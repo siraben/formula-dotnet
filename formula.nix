@@ -1,26 +1,32 @@
-{ lib, stdenv, fetchFromGitHub, buildDotnetModule, dotnetCorePackages }:
+{ lib, buildPythonApplication, pythonRelaxDepsHook, hatchling, antlr4-python3-runtime, z3-solver, pytestCheckHook, antlr4 }:
 
-buildDotnetModule rec {
-  pname = "formula-dotnet";
-  version = "2.0";
-  buildType = "Release";
+buildPythonApplication {
+  pname = "formula";
+  version = "2.0.0";
+  pyproject = true;
 
   src = ./.;
 
-  nugetDeps = ./nuget.nix;
-  projectFile = "Src/CommandLine/CommandLine.sln";
+  nativeBuildInputs = [ antlr4 pythonRelaxDepsHook ];
 
-  dotnetFlags = [ "/p:Configuration=Release" "/p:Platform=x64" ];
+  pythonRemoveDeps = [ "z3-solver" ];
 
-  dotnet-runtime = dotnetCorePackages.runtime_6_0;
-  dotnet-sdk = dotnetCorePackages.sdk_6_0;
-  postFixup = if stdenv.isLinux then ''
-    mv $out/bin/CommandLine $out/bin/formula
-  '' else lib.optionalString stdenv.isDarwin ''
-    makeWrapper ${dotnetCorePackages.runtime_6_0}/bin/dotnet $out/bin/formula \
-      --add-flags "$out/lib/formula-dotnet/CommandLine.dll" \
-      --prefix DYLD_LIBRARY_PATH : $out/lib/formula-dotnet/runtimes/macos/native
+  build-system = [ hatchling ];
+
+  dependencies = [
+    antlr4-python3-runtime
+    z3-solver
+  ];
+
+  preBuild = ''
+    cd src/formula/api/parser
+    antlr4 -Dlanguage=Python3 -visitor -no-listener FormulaLexer.g4 FormulaParser.g4
+    cd ../../../..
   '';
+
+  nativeCheckInputs = [
+    pytestCheckHook
+  ];
 
   meta = with lib; {
     description = "Formal Specifications for Verification and Synthesis";

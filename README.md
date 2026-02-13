@@ -2,37 +2,51 @@
 [![build](https://github.com/VUISIS/formula-dotnet/actions/workflows/build.yml/badge.svg)](https://github.com/VUISIS/formula-dotnet/actions/workflows/build.yml)
 
 ## Building and running FORMULA
+
 ### With Nix flakes (macOS/Linux)
-To build and run the command line interpreter with Nix flakes, run
+To build and run the command line interpreter with Nix flakes:
 
 ```bash
-$ nix run github:VUISIS/formula-dotnet
+nix run github:VUISIS/formula-dotnet
 ```
 
-### With .NET on x64
-To build the command line interpreter, run the following commands from Src/CommandLine.
+### With pip
+
+Requires Python 3.11+ and a Java runtime (for ANTLR4 grammar generation).
 
 ```bash
-$ dotnet build CommandLine.sln /p:Configuration=Debug|Release /p:Platform=x64
-$ dotnet ./bin/<Configuration>/<OS>/<PLATFORM>/net6.0/CommandLine.dll
+pip install -e .
+formula
 ```
 
-### With .NET on ARM64 MacOS
-```bash
-For native ARM64 builds on Mac OS X run nuget add before restore and build:
-$ dotnet nuget add source --username USERNAME --password GITHUB_TOKEN --store-password-in-clear-text --name github "https://nuget.pkg.github.com/VUISIS/index.json"
-$ dotnet build CommandLineARM.sln /p:Configuration=Debug|Release /p:Platform=ARM64
-$ dotnet ./bin/<Configuration>/<OS>/<PLATFORM>/net6.0/CommandLine.dll
-```
-
-To run unit tests with Formula, run the following command from
-Src/Tests.
+### Running tests
 
 ```bash
-$  dotnet test Tests.csproj /p:Configuration=Debug|Release /p:Platform=x64|ARM64
-
-For specific tests
-$ dotnet test Tests.csproj /p:Configuration=Debug|Release /p:Platform=x64|ARM64 --filter "FullyQualifiedName=<NAMESPACE>.<CLASS>.<METHOD>"
+pip install -e ".[dev]"
+pytest tests/ -v
 ```
 
-You can exit the command line interpreter with the "exit" command.
+Integration tests (solver tests) require `z3-solver` and the test `.4ml` files in `Tst/`:
+
+```bash
+pytest tests/ -v -m integration
+```
+
+### Jupyter kernel
+
+```bash
+pip install -e ".[kernel]"
+python -m kernel.install
+```
+
+Then open a Jupyter notebook and select the "Formula" kernel.
+
+## CLI usage
+
+You can exit the command line interpreter with the `exit` command. Available commands include:
+
+- `load <file>` - Load a `.4ml` specification file
+- `solve <model> <n> <domain>.conforms` - Solve for up to n models
+- `query <model> <query>` - Query a model
+- `print <module>` - Print a module
+- `help` - Show all available commands

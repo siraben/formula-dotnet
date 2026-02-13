@@ -1,4 +1,4 @@
-name: .NET
+name: Python
 
 on:
   push:
@@ -12,36 +12,24 @@ jobs:
     strategy:
       matrix:
         os: [ ubuntu-latest, windows-latest, macOS-latest ]
+        python-version: [ '3.13' ]
     steps:
-    - uses: actions/checkout@v3
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v2
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
       with:
-        dotnet-version: 6.0.x
-    - name: Restore dependencies
-      working-directory: ./Src/CommandLine
-      run: dotnet restore CommandLine.sln
-    - name: Build
-      working-directory: ./Src/CommandLine
-      run: dotnet build CommandLine.sln /p:Configuration=Release /p:Platform=x64
-    - name: Copy to Liblibz3 MacOS
-      if: ${{ matrix.os == 'macOS-latest' }}
-      run: cp ${GITHUB_WORKSPACE}/Src/CommandLine/bin/Release/MacOS/x64/net6.0/runtimes/osx-x64/native/libz3.dylib ${GITHUB_WORKSPACE}/Src/CommandLine/bin/Release/MacOS/x64/net6.0/runtimes/osx-x64/native/liblibz3.dylib
-    - name: Test Ubuntu
-      if: ${{ matrix.os == 'ubuntu-latest' }}
-      working-directory: ./Src/Tests
-      run: |
-        export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${GITHUB_WORKSPACE}/Src/CommandLine/bin/Release/Linux/x64/net6.0/runtimes/linux-x64/native
-        dotnet test Tests.csproj --logger "console;verbosity=detailed" /p:Configuration=Release /p:Platform=x64
-    - name: Test MacOS
-      if: ${{ matrix.os == 'macOS-latest' }}
-      working-directory: ./Src/Tests
-      run: |
-        export DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH}:${GITHUB_WORKSPACE}/Src/CommandLine/bin/Release/MacOS/x64/net6.0/runtimes/osx-x64/native
-        dotnet test Tests.csproj --logger "console;verbosity=detailed" /p:Configuration=Release /p:Platform=x64
-    - name: Test Windows
-      if: ${{ matrix.os == 'windows-latest' }}
-      working-directory: ./Src/Tests
-      run: |
-        set PATH="%PATH%;${GITHUB_WORKSPACE}\Src\CommandLine\bin\Release\Windows\x64\net6.0\runtimes\win-x64\native"
-        dotnet test Tests.csproj --logger "console;verbosity=detailed" /p:Configuration=Release /p:Platform=x64
+        python-version: ${{ matrix.python-version }}
+    - name: Set up Java (for ANTLR4)
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+    - name: Install ANTLR4
+      run: pip install antlr4-tools
+    - name: Generate parser
+      working-directory: ./src/formula/api/parser
+      run: antlr4 -Dlanguage=Python3 -visitor -no-listener FormulaLexer.g4 FormulaParser.g4
+    - name: Install package
+      run: pip install -e ".[dev]"
+    - name: Run tests
+      run: pytest tests/ -v

@@ -1,3 +1,0 @@
-run: bin\Debug\LittleFuncLang.exe
-dsc: Test code generator and loading / converting object graphs
-acc: .\
