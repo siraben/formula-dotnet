@@ -32,6 +32,27 @@ async function init() {
     post("progress", { phase: "Loading Z3 solver (this may take a moment)..." });
     const Z3_CDN = "https://cdn.jsdelivr.net/npm/z3-solver@4.13.4/build/";
     self.__filename = Z3_CDN + "z3-built.js";
+
+    // Monkey-patch Worker so Emscripten's pthread sub-workers can load
+    // cross-origin z3-built.js. Browsers block cross-origin worker scripts,
+    // but importScripts (inside a worker) IS allowed cross-origin.
+    const OriginalWorker = self.Worker;
+    self.Worker = function (url, opts) {
+      if (typeof url === "string" && !url.startsWith("blob:")) {
+        try {
+          const parsed = new URL(url, self.location.href);
+          if (parsed.origin !== self.location.origin) {
+            const blob = new Blob(
+              [`importScripts(${JSON.stringify(parsed.href)});`],
+              { type: "application/javascript" }
+            );
+            return new OriginalWorker(URL.createObjectURL(blob), opts);
+          }
+        } catch (e) { /* fall through */ }
+      }
+      return new OriginalWorker(url, opts);
+    };
+
     importScripts(Z3_CDN + "z3-built.js");
 
     // Make initZ3 accessible as global.initZ3 (browser.js reads from `global`)
