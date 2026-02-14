@@ -303,7 +303,11 @@ exampleSelect.addEventListener("change", () => {
   if (name && EXAMPLES[name]) {
     editor.value = EXAMPLES[name];
     clearOutput();
-    requestParse();
+    // Immediate parse (bypass debounce) so selectors update before user clicks Run
+    if (parseTimer) clearTimeout(parseTimer);
+    if (isReady && worker) {
+      worker.postMessage({ type: "parse", code: editor.value });
+    }
   }
 });
 
