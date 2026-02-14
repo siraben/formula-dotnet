@@ -121,9 +121,9 @@ async function handleSolve({ code, model, domain, maxSols }) {
   return JSON.parse(result);
 }
 
-async function handleInspect({ code, module, view }) {
+async function handleInspectAll({ code, module }) {
   const result = await pyodide.runPythonAsync(
-    `from formula_bridge import inspect; inspect(${JSON.stringify(code)}, ${JSON.stringify(module || "")}, ${JSON.stringify(view)})`,
+    `from formula_bridge import inspect_all; inspect_all(${JSON.stringify(code)}, ${JSON.stringify(module || "")})`,
   );
   return JSON.parse(result);
 }
@@ -138,13 +138,16 @@ self.onmessage = async (e) => {
       post("parseResult", { result: await handleParse(msg.code) });
     } else if (msg.type === "solve") {
       post("solveResult", { result: await handleSolve(msg) });
-    } else if (msg.type === "inspect") {
-      post("inspectResult", { result: await handleInspect(msg), view: msg.view });
+    } else if (msg.type === "inspectAll") {
+      const result = await handleInspectAll(msg);
+      post("inspectAllResult", { result });
     }
   } catch (err) {
     const error = { severity: "Error", message: err.message, line: 0, col: 0 };
     if (msg.type === "parse") {
       post("parseResult", { result: { ...EMPTY_PARSE, errors: [error] } });
+    } else if (msg.type === "inspectAll") {
+      post("inspectAllResult", { result: { ast: err.message, types: "", details: "", rules: "" } });
     } else {
       post("solveResult", { result: { ...EMPTY_SOLVE, errors: [error] } });
     }

@@ -189,7 +189,23 @@ def inspect(code, module_name, view):
         return json.dumps({"ok": True, "content": content})
 
     except Exception as exc:
-        return json.dumps({"ok": False, "content": f"Error: {exc}"})
+        import traceback
+        return json.dumps({"ok": False, "content": f"Error: {exc}\n{traceback.format_exc()}"})
+
+
+def inspect_all(code, module_name):
+    """Return inspection data for all views at once (ast, types, details, rules).
+
+    Returns JSON string with {"ast": "...", "types": "...", "details": "...", "rules": "..."}.
+    """
+    views = {}
+    for view in ("ast", "types", "details", "rules"):
+        try:
+            result = json.loads(inspect(code, module_name, view))
+            views[view] = result.get("content", "")
+        except Exception as exc:
+            views[view] = f"Error: {exc}"
+    return json.dumps(views)
 
 
 def _module_details(node):

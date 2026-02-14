@@ -354,9 +354,7 @@ function sendInspectAll() {
   if (!isReady || !worker) return;
   const mod = getInspectModule();
   const code = editor.value;
-  for (const view of ["ast", "types", "details", "rules"]) {
-    worker.postMessage({ type: "inspect", code, module: mod, view });
-  }
+  worker.postMessage({ type: "inspectAll", code, module: mod });
 }
 
 // ── Tab switching ────────────────────────────────────────────────
@@ -441,18 +439,17 @@ function handleWorkerMessage(e) {
           appendOutput(`${err.severity}: ${err.message}${loc}\n`, "error");
         }
       }
-      // After successful parse, request inspection data
-      if (data.result.ok) {
-        sendInspectAll();
-      }
+      // Request inspection data after parse
+      sendInspectAll();
       break;
 
-    case "inspectResult": {
-      const view = data.view;
-      const content = data.result?.content || "";
-      tabContent[view] = content;
-      if (activeTab === view) {
-        showTabContent(view);
+    case "inspectAllResult": {
+      const result = data.result || {};
+      for (const view of ["ast", "types", "details", "rules"]) {
+        tabContent[view] = result[view] || "";
+      }
+      if (activeTab !== "output") {
+        showTabContent(activeTab);
       }
       break;
     }
