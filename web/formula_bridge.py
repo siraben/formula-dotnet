@@ -248,8 +248,12 @@ def _module_details(node):
     return "\n".join(lines)
 
 
-def solve(code, model_name, domain_name, max_sols=1):
-    """Parse code and run the direct solver. Returns JSON result."""
+async def solve(code, model_name, domain_name, max_sols=1):
+    """Parse code and run the direct solver. Returns JSON result.
+
+    Async to support browsers without JSPI/stack-switching (e.g. Safari).
+    The Z3 solver.check() returns a JS Promise which must be awaited.
+    """
     sink = WebSink()
 
     try:
@@ -288,20 +292,94 @@ def solve(code, model_name, domain_name, max_sols=1):
                 "output": "",
             })
 
-        from formula.cli._direct_solver import direct_solve
-        result = direct_solve(domain_node, model_node, max_sols, sink)
+        from formula.cli._direct_solver import (
+            _build_ctx, _get_recursion_bound, _derive_instances, _eval_conforms,
+        )
+        import z3
 
-        if isinstance(result, tuple):
-            success, solution = result
-        else:
-            success = result
-            solution = None
+        sink.write_message_line("Starting direct Z3 solver...", SeverityKind.Info)
 
+        ctx = _build_ctx(domain_node, model_node)
+
+        sink.write_message_line(
+            "  Constructors: %s" % list(ctx.ctors.keys()), SeverityKind.Info)
+        sink.write_message_line(
+            "  Rules: %s" % list(ctx.rules_by_head.keys()), SeverityKind.Info)
+        sink.write_message_line(
+            "  Facts: %d, Symbolic vars: %s"
+            % (sum(len(v) for v in ctx.base.values()), set(ctx.z3_vars.keys())),
+            SeverityKind.Info)
+
+        recursion_bound = _get_recursion_bound(model_node)
+        _derive_instances(ctx, recursion_bound)
+
+        derived_count = sum(len(v) for v in ctx.derived.values())
+        if derived_count > 0:
+            sink.write_message_line("  Derived %d instances" % derived_count, SeverityKind.Info)
+
+        constraints = _eval_conforms(domain_node, ctx)
+
+        solver = z3.Solver()
+        solver.set("timeout", 30000)
+
+        for tc in ctx.type_constraints:
+            solver.add(tc)
+
+        for c in constraints:
+            if isinstance(c, z3.BoolRef):
+                solver.add(c)
+            elif isinstance(c, bool) and not c:
+                sink.write_message_line("  Trivially UNSAT", SeverityKind.Info)
+                return json.dumps({
+                    "ok": False, "result": "unsat",
+                    "solution": {}, "output": sink._buf.getvalue(),
+                })
+
+        sink.write_message_line("  Checking satisfiability...", SeverityKind.Info)
+
+        solutions = []
+        sol_count = 0
+
+        while sol_count < max_sols:
+            result = await solver.check_async()
+
+            if result == z3.sat:
+                model = solver.model()
+                sol_count += 1
+                sink.write_message_line(
+                    "  SAT - Solution %d found!" % sol_count, SeverityKind.Info)
+                solution = {}
+                block_clause = []
+                for vn in sorted(ctx.z3_vars.keys()):
+                    zvar = ctx.z3_vars[vn]
+                    val = model.evaluate(zvar)
+                    sink.write_message_line("    %s = %s" % (vn, val), SeverityKind.Info)
+                    solution[vn] = str(val)
+                    block_clause.append(zvar != val)
+                solutions.append(solution)
+
+                if sol_count < max_sols:
+                    solver.add(z3.Or(*block_clause))
+            elif result == z3.unsat:
+                if sol_count == 0:
+                    sink.write_message_line("  UNSAT - No solution", SeverityKind.Info)
+                else:
+                    sink.write_message_line(
+                        "  No more solutions (%d total)" % sol_count, SeverityKind.Info)
+                break
+            else:
+                sink.write_message_line(
+                    "  UNKNOWN - Solver inconclusive", SeverityKind.Warning)
+                break
+
+        if solutions:
+            return json.dumps({
+                "ok": True, "result": "sat",
+                "solution": solutions[0], "output": sink._buf.getvalue(),
+            })
         return json.dumps({
-            "ok": success,
-            "result": "sat" if success else "unsat",
-            "solution": solution or {},
-            "output": sink._buf.getvalue(),
+            "ok": False, "result": "unsat",
+            "solution": {}, "output": sink._buf.getvalue(),
         })
 
     except Exception as exc:

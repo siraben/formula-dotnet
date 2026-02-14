@@ -116,7 +116,7 @@ async function handleParse(code) {
 
 async function handleSolve({ code, model, domain, maxSols }) {
   const result = await pyodide.runPythonAsync(
-    `from formula_bridge import solve; solve(${JSON.stringify(code)}, ${JSON.stringify(model)}, ${JSON.stringify(domain)}, ${maxSols || 1})`,
+    `from formula_bridge import solve; await solve(${JSON.stringify(code)}, ${JSON.stringify(model)}, ${JSON.stringify(domain)}, ${maxSols || 1})`,
   );
   return JSON.parse(result);
 }

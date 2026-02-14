@@ -287,6 +287,16 @@ class Solver:
             return unsat
         return unknown
 
+    async def check_async(self):
+        """Async version of check() that works without JSPI (e.g. Safari)."""
+        result = await self._js.check()
+        r = str(result)
+        if r == "sat":
+            return sat
+        elif r == "unsat":
+            return unsat
+        return unknown
+
     def model(self):
         return ModelRef(self._js.model())
 
