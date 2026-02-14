@@ -1,0 +1,71 @@
+// 3x3 Magic Square
+//
+// Fill a 3x3 grid with the digits 1 through 9 (each used exactly once)
+// such that every row, column, and diagonal sums to 15.
+//
+//   c00  c01  c02        e.g.   2  7  6
+//   c10  c11  c12               9  5  1
+//   c20  c21  c22               4  3  8
+//
+// There are 8 solutions (rotations and reflections of the base solution).
+
+domain MagicSquare
+{
+    Grid ::= new (c00: Integer, c01: Integer, c02: Integer,
+                  c10: Integer, c11: Integer, c12: Integer,
+                  c20: Integer, c21: Integer, c22: Integer).
+
+    // Each cell contains a value in [1, 9]
+    validRange :- g is Grid,
+        g.c00 >= 1, g.c00 <= 9,
+        g.c01 >= 1, g.c01 <= 9,
+        g.c02 >= 1, g.c02 <= 9,
+        g.c10 >= 1, g.c10 <= 9,
+        g.c11 >= 1, g.c11 <= 9,
+        g.c12 >= 1, g.c12 <= 9,
+        g.c20 >= 1, g.c20 <= 9,
+        g.c21 >= 1, g.c21 <= 9,
+        g.c22 >= 1, g.c22 <= 9.
+
+    // All nine values are distinct
+    allDistinct :- g is Grid,
+        g.c00 != g.c01, g.c00 != g.c02, g.c00 != g.c10,
+        g.c00 != g.c11, g.c00 != g.c12, g.c00 != g.c20,
+        g.c00 != g.c21, g.c00 != g.c22,
+        g.c01 != g.c02, g.c01 != g.c10, g.c01 != g.c11,
+        g.c01 != g.c12, g.c01 != g.c20, g.c01 != g.c21,
+        g.c01 != g.c22,
+        g.c02 != g.c10, g.c02 != g.c11, g.c02 != g.c12,
+        g.c02 != g.c20, g.c02 != g.c21, g.c02 != g.c22,
+        g.c10 != g.c11, g.c10 != g.c12, g.c10 != g.c20,
+        g.c10 != g.c21, g.c10 != g.c22,
+        g.c11 != g.c12, g.c11 != g.c20, g.c11 != g.c21,
+        g.c11 != g.c22,
+        g.c12 != g.c20, g.c12 != g.c21, g.c12 != g.c22,
+        g.c20 != g.c21, g.c20 != g.c22,
+        g.c21 != g.c22.
+
+    // Every row sums to 15
+    rowSums :- g is Grid,
+        g.c00 + g.c01 + g.c02 = 15,
+        g.c10 + g.c11 + g.c12 = 15,
+        g.c20 + g.c21 + g.c22 = 15.
+
+    // Every column sums to 15
+    colSums :- g is Grid,
+        g.c00 + g.c10 + g.c20 = 15,
+        g.c01 + g.c11 + g.c21 = 15,
+        g.c02 + g.c12 + g.c22 = 15.
+
+    // Both diagonals sum to 15
+    diagSums :- g is Grid,
+        g.c00 + g.c11 + g.c22 = 15,
+        g.c02 + g.c11 + g.c20 = 15.
+
+    conforms validRange, allDistinct, rowSums, colSums, diagSums.
+}
+
+partial model pm of MagicSquare
+{
+    Grid(a, b, c, d, e, f, g, h, i).
+}

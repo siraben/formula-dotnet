@@ -1,0 +1,30 @@
+// Pythagorean Triples
+//
+// Find integer triples (a, b, c) satisfying a^2 + b^2 = c^2
+// with a <= b < c (canonical ordering) and all values positive.
+//
+// Classic examples: (3,4,5), (5,12,13), (8,15,17), (7,24,25).
+
+domain PythagoreanTriple
+{
+    Triple ::= new (a: Integer, b: Integer, c: Integer).
+
+    // All sides are positive
+    positive :- t is Triple, t.a >= 1, t.b >= 1, t.c >= 1.
+
+    // a^2 + b^2 = c^2
+    pythagorean :- t is Triple, t.a * t.a + t.b * t.b = t.c * t.c.
+
+    // Canonical order: a <= b < c
+    ordered :- t is Triple, t.a <= t.b, t.b < t.c.
+
+    // Keep solutions small
+    bounded :- t is Triple, t.c <= 50.
+
+    conforms positive, pythagorean, ordered, bounded.
+}
+
+partial model pm of PythagoreanTriple
+{
+    Triple(a, b, c).
+}

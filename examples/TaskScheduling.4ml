@@ -1,0 +1,63 @@
+// Task Scheduling with Precedence and Resource Constraints
+//
+// Schedule 5 tasks on a single machine.  Each task has a fixed
+// duration and a start time to be determined.  Precedence edges
+// require one task to finish before another begins.  No two tasks
+// may overlap in time.
+//
+// Tasks:                        Precedences (must finish before):
+//   T0: duration 3                T0 -> T1
+//   T1: duration 2                T0 -> T2
+//   T2: duration 4                T1 -> T3
+//   T3: duration 2                T2 -> T4
+//   T4: duration 3
+//
+// The makespan (time to complete all tasks) should be minimized.
+// Critical path: T0(3) -> T2(4) -> T4(3) = 10, so makespan >= 10.
+
+domain TaskScheduling
+{
+    Schedule ::= new (s0: Integer, s1: Integer, s2: Integer,
+                      s3: Integer, s4: Integer).
+
+    // Durations are fixed: d0=3, d1=2, d2=4, d3=2, d4=3
+    // All start times are non-negative
+    validStarts :- s is Schedule,
+        s.s0 >= 0, s.s1 >= 0, s.s2 >= 0, s.s3 >= 0, s.s4 >= 0.
+
+    // Precedence constraints: task A must finish before task B starts
+    // T0 -> T1:  s0 + 3 <= s1
+    // T0 -> T2:  s0 + 3 <= s2
+    // T1 -> T3:  s1 + 2 <= s3
+    // T2 -> T4:  s2 + 4 <= s4
+    precedences :- s is Schedule,
+        s.s0 + 3 <= s.s1,
+        s.s0 + 3 <= s.s2,
+        s.s1 + 2 <= s.s3,
+        s.s2 + 4 <= s.s4.
+
+    // Non-overlap on a single machine: for each pair (i,j),
+    // either task i finishes before j starts, or j finishes before i.
+    // Encoded by requiring a total order on task execution.
+    // We impose a feasible ordering: T0, T1, T2, T3, T4
+    noOverlap :- s is Schedule,
+        s.s0 + 3 <= s.s1,
+        s.s1 + 2 <= s.s2,
+        s.s2 + 4 <= s.s3,
+        s.s3 + 2 <= s.s4.
+
+    // Makespan constraint: all tasks finish by time 20
+    bounded :- s is Schedule,
+        s.s0 + 3 <= 20,
+        s.s1 + 2 <= 20,
+        s.s2 + 4 <= 20,
+        s.s3 + 2 <= 20,
+        s.s4 + 3 <= 20.
+
+    conforms validStarts, precedences, noOverlap, bounded.
+}
+
+partial model pm of TaskScheduling
+{
+    Schedule(a, b, c, d, e).
+}

@@ -1,0 +1,45 @@
+// 4-Queens Puzzle
+//
+// Place 4 queens on a 4x4 chessboard so that no two queens
+// threaten each other.  Queen i is placed in row i, column q_i.
+// Constraints:
+//   - All columns are distinct (no two queens share a column)
+//   - No two queens share a diagonal: |row_i - row_j| != |col_i - col_j|
+//
+// The two solutions are (2,4,1,3) and (3,1,4,2).
+
+domain FourQueens
+{
+    Queens ::= new (q1: Integer, q2: Integer, q3: Integer, q4: Integer).
+
+    // Columns must be in range [1, 4]
+    validCols :- q is Queens,
+        q.q1 >= 1, q.q1 <= 4,
+        q.q2 >= 1, q.q2 <= 4,
+        q.q3 >= 1, q.q3 <= 4,
+        q.q4 >= 1, q.q4 <= 4.
+
+    // No two queens in the same column
+    distinctCols :- q is Queens,
+        q.q1 != q.q2, q.q1 != q.q3, q.q1 != q.q4,
+        q.q2 != q.q3, q.q2 != q.q4,
+        q.q3 != q.q4.
+
+    // No two queens on the same diagonal
+    // For rows i,j the diagonal constraint is: |q_i - q_j| != |i - j|
+    // Encoded as: q_i - q_j != (i-j) AND q_j - q_i != (i-j)
+    noDiagonals :- q is Queens,
+        q.q1 - q.q2 != 1, q.q2 - q.q1 != 1,
+        q.q1 - q.q3 != 2, q.q3 - q.q1 != 2,
+        q.q1 - q.q4 != 3, q.q4 - q.q1 != 3,
+        q.q2 - q.q3 != 1, q.q3 - q.q2 != 1,
+        q.q2 - q.q4 != 2, q.q4 - q.q2 != 2,
+        q.q3 - q.q4 != 1, q.q4 - q.q3 != 1.
+
+    conforms validCols, distinctCols, noDiagonals.
+}
+
+partial model pm of FourQueens
+{
+    Queens(a, b, c, d).
+}
