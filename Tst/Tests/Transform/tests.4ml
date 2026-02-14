@@ -1,0 +1,24 @@
+// Test specification for transform execution
+
+domain Numbers {
+    N ::= new (val: Integer).
+}
+
+transform Double (in:: Numbers) returns (out:: Numbers) {
+    out.N(x * 2) :- in.N(x).
+}
+
+transform Identity (in:: Numbers) returns (out:: Numbers) {
+    out.N(x) :- in.N(x).
+}
+
+model m1 of Numbers {
+    N(1).
+    N(2).
+    N(3).
+}
+
+model m2 of Numbers {
+    N(10).
+    N(20).
+}

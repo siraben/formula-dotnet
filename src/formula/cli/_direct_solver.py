@@ -290,6 +290,16 @@ def _resolve(node: Node, env: dict, ctx: Ctx) -> Any:
     return None
 
 
+def _simplify(expr: Any) -> Any:
+    """Simplify a Z3 expression if it's ground (no free variables)."""
+    if isinstance(expr, z3.ExprRef):
+        try:
+            return z3.simplify(expr)
+        except Exception:
+            return expr
+    return expr
+
+
 def _eval_op(op: OpKind, raw_args: list, env: dict, ctx: Ctx) -> Any:
     if op in (OpKind.Add, OpKind.Sub, OpKind.Mul, OpKind.Div, OpKind.Mod):
         a = _resolve(raw_args[0], env, ctx) if len(raw_args) > 0 else None
@@ -297,11 +307,11 @@ def _eval_op(op: OpKind, raw_args: list, env: dict, ctx: Ctx) -> Any:
         a, b = _coerce(a, b)
         if a is None or b is None:
             return None
-        if op == OpKind.Add: return a + b
-        if op == OpKind.Sub: return a - b
-        if op == OpKind.Mul: return a * b
-        if op == OpKind.Div: return a / b
-        if op == OpKind.Mod: return a % b
+        if op == OpKind.Add: return _simplify(a + b)
+        if op == OpKind.Sub: return _simplify(a - b)
+        if op == OpKind.Mul: return _simplify(a * b)
+        if op == OpKind.Div: return _simplify(a / b)
+        if op == OpKind.Mod: return _simplify(a % b)
 
     if op == OpKind.Neg:
         a = _resolve(raw_args[0], env, ctx) if raw_args else None

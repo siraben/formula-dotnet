@@ -1158,12 +1158,284 @@ class RuleTable:
             ok = rule.initialize() and ok
         return ok
 
+    def compile_rules(self, mod_data: Any) -> bool:
+        """
+        Compile AST Rule nodes from the module into CoreRule objects.
+
+        Ported from C# RuleTable.Compile (via ActionSet).
+        Walks each Rule node, converts head expressions and body constraints
+        into Term objects using the TermIndex, and creates CoreRule objects.
+
+        Parameters
+        ----------
+        mod_data : ModuleData
+            The module data containing the reduced AST and symbol table.
+
+        Returns True on success.
+        """
+        reduced = getattr(mod_data, "reduced", None)
+        if reduced is None:
+            return True
+
+        rules_ast = getattr(reduced, "rules", [])
+        if not rules_ast:
+            return True
+
+        symbol_table = self._index.symbol_table
+
+        for rule_node in rules_ast:
+            heads = getattr(rule_node, "heads", [])
+            bodies = getattr(rule_node, "bodies", [])
+
+            for head_node in heads:
+                for body_node in bodies:
+                    self._compile_one_rule(head_node, body_node, rule_node, symbol_table)
+
+        self.stratify()
+        return True
+
+    def _compile_one_rule(
+        self,
+        head_node: Any,
+        body_node: Any,
+        rule_node: Any,
+        symbol_table: Any,
+    ) -> None:
+        """
+        Compile a single (head, body) pair into a CoreRule.
+
+        Converts AST nodes to Terms in the TermIndex and creates
+        FindData objects for Find constraints in the body.
+        """
+        from formula.api.nodes import Find, RelConstr, FuncTerm, Id, Cnst, Compr
+        from formula.api.constants import RelKind, OpKind
+
+        variables: Dict[str, Term] = {}  # variable name -> Term
+
+        # Convert head AST to Term
+        head_term = _ast_to_term(head_node, self._index, symbol_table, variables)
+        if head_term is None:
+            return
+
+        # Extract Find and non-Find constraints from the body
+        constraints_ast = getattr(body_node, "constraints", [])
+        finds: list = []
+        other_constraints: list = []
+
+        for c in constraints_ast:
+            if isinstance(c, Find):
+                finds.append(c)
+            else:
+                other_constraints.append(c)
+
+        # Build FindData for up to 2 Find constraints
+        find1 = FindData()
+        find2 = FindData()
+
+        if len(finds) >= 1:
+            find1 = self._compile_find(finds[0], symbol_table, variables)
+
+        if len(finds) >= 2:
+            find2 = self._compile_find(finds[1], symbol_table, variables)
+
+        # For rules with >2 finds, chain additional finds as constraints
+        # (simplified: we handle up to 2 finds directly)
+
+        # Convert non-Find constraints to Terms
+        constraint_terms: Set[Term] = set()
+        for c in other_constraints:
+            ct = _ast_to_term(c, self._index, symbol_table, variables)
+            if ct is not None:
+                constraint_terms.add(ct)
+
+        # Re-resolve the head term now that we have all variable bindings
+        # from the body finds (variables dict may have been populated)
+        head_term = _ast_to_term(head_node, self._index, symbol_table, variables)
+        if head_term is None:
+            return
+
+        self.create_rule(
+            head_term,
+            find1,
+            find2,
+            constraint_terms if constraint_terms else None,
+            node=rule_node,
+        )
+
+    def _compile_find(
+        self,
+        find_node: Any,
+        symbol_table: Any,
+        variables: Dict[str, Term],
+    ) -> FindData:
+        """Convert a Find AST node to a FindData object."""
+        from formula.api.nodes import Id
+
+        match = find_node.match
+        binding_node = find_node.binding
+
+        # Build the pattern Term from the match expression
+        pattern = _ast_to_term(match, self._index, symbol_table, variables)
+        if pattern is None:
+            return FindData()
+
+        # Build the binding term (the variable that captures the match)
+        binding: Optional[Term] = None
+        if binding_node is not None and isinstance(binding_node, Id):
+            binding, _ = self._index.mk_var(binding_node.name)
+            variables[binding_node.name] = binding
+
+        # Build a type term from the pattern's root symbol
+        type_term: Optional[Term] = None
+        if pattern.symbol.is_data_constructor:
+            # Use the constructor's sort symbol as the type
+            sort_sym = getattr(pattern.symbol, "sort_symbol", None)
+            if sort_sym is not None:
+                type_term = self._index.mk_apply(sort_sym, [])[0]
+
+        if binding is None:
+            # If no explicit binding, use the pattern itself as binding
+            binding = pattern
+
+        return FindData(binding, pattern, type_term)
+
     def debug_print(self) -> None:
         """Print all rules to stdout."""
         print(f"=== RuleTable ({len(self._rules)} rules) ===")
         for rule in self._rules:
             rule.debug_print_rule()
             print()
+
+
+# ===================================================================
+# AST-to-Term conversion
+# ===================================================================
+
+def _ast_to_term(
+    node: Any,
+    index: TermIndex,
+    symbol_table: Any,
+    variables: Dict[str, Term],
+) -> Optional[Term]:
+    """
+    Convert an AST expression node to a Term in the TermIndex.
+
+    Handles:
+    - Id: variable or constructor/constant reference
+    - Cnst: numeric or string constant
+    - FuncTerm: constructor application or arithmetic operation
+    - RelConstr: relational constraint (=, !=, <, >, etc.)
+    - Compr: comprehension (for aggregation)
+
+    Ported from the C# ActionSet logic that converts AST nodes to Terms.
+    """
+    from formula.api.nodes import FuncTerm, Id, Cnst, RelConstr, Compr, Find, Range
+    from formula.api.constants import OpKind, RelKind, CnstKind
+    from fractions import Fraction
+
+    if node is None:
+        return None
+
+    if isinstance(node, Cnst):
+        raw = node.raw
+        if isinstance(raw, Fraction):
+            return index.mk_cnst(raw)[0]
+        elif isinstance(raw, (int, float)):
+            return index.mk_cnst(Fraction(raw))[0]
+        elif isinstance(raw, str):
+            return index.mk_cnst(raw)[0]
+        return None
+
+    if isinstance(node, Id):
+        name = node.name
+        fragments = getattr(node, "fragments", None)
+
+        # Check if this is a known variable
+        if name in variables:
+            return variables[name]
+
+        # Check namespace-qualified name (e.g., "out.N")
+        if fragments and len(fragments) > 1:
+            # Try resolving as a qualified name in the symbol table
+            sym, _ = symbol_table.resolve(name)
+            if sym is not None and sym.arity == 0:
+                return index.mk_apply(sym, [])[0]
+            # If not found as a 0-arity symbol, treat as variable
+            var, _ = index.mk_var(name)
+            variables[name] = var
+            return var
+
+        # Try resolving as a constructor/constant
+        sym, _ = symbol_table.resolve(name)
+        if sym is not None and sym.arity == 0:
+            return index.mk_apply(sym, [])[0]
+
+        # Otherwise it's a variable
+        var, _ = index.mk_var(name)
+        variables[name] = var
+        return var
+
+    if isinstance(node, FuncTerm):
+        fn = node.function
+        raw_args = list(node.args)
+
+        if isinstance(fn, OpKind):
+            # Arithmetic/logical operation
+            args = [_ast_to_term(a, index, symbol_table, variables) for a in raw_args]
+            if any(a is None for a in args):
+                return None
+            if symbol_table.has_op_symbol(fn):
+                op_sym = symbol_table.get_op_symbol(fn)
+                return index.mk_apply(op_sym, args)[0]
+            return None
+
+        if isinstance(fn, Id):
+            fn_name = fn.name
+            fragments = getattr(fn, "fragments", None)
+
+            # Resolve constructor name (possibly namespace-qualified)
+            sym, _ = symbol_table.resolve(fn_name)
+            if sym is not None:
+                args = [_ast_to_term(a, index, symbol_table, variables) for a in raw_args]
+                if any(a is None for a in args):
+                    return None
+                return index.mk_apply(sym, args)[0]
+
+            # Try as an operation name
+            op_map = {o.name.lower(): o for o in OpKind}
+            if fn_name.lower() in op_map:
+                op_kind = op_map[fn_name.lower()]
+                args = [_ast_to_term(a, index, symbol_table, variables) for a in raw_args]
+                if any(a is None for a in args):
+                    return None
+                if symbol_table.has_op_symbol(op_kind):
+                    op_sym = symbol_table.get_op_symbol(op_kind)
+                    return index.mk_apply(op_sym, args)[0]
+
+            # Unknown constructor - create it as a user symbol if possible
+            return None
+
+        return None
+
+    if isinstance(node, RelConstr):
+        # Relational constraint: convert to a term using the rel op symbol
+        lhs = _ast_to_term(node.arg1, index, symbol_table, variables)
+        rhs = _ast_to_term(node.arg2, index, symbol_table, variables) if node.arg2 is not None else None
+        if lhs is None:
+            return None
+        if symbol_table.has_op_symbol(node.op):
+            op_sym = symbol_table.get_op_symbol(node.op)
+            if rhs is not None:
+                return index.mk_apply(op_sym, [lhs, rhs])[0]
+            else:
+                return index.mk_apply(op_sym, [lhs])[0]
+        return None
+
+    if isinstance(node, Find):
+        # Find in a constraint position (shouldn't happen normally)
+        return _ast_to_term(node.match, index, symbol_table, variables)
+
+    return None
 
 
 # ===================================================================

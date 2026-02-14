@@ -868,11 +868,332 @@ class CommandInterface:
             self._sink.write_message_line(f"  No proofs for {term}")
 
     def _do_apply(self, s: str) -> None:
+        """Apply a transform step.
+
+        Syntax: apply out1 [, out2, ...] = TransformName(arg1 [, arg2, ...])
+
+        Ported from C# CommandInterface.DoApply.
+        """
         if not s.strip():
             self._sink.write_message_line(_APPLY_INFO, SeverityKind.Warning)
             return
+
+        # Parse the apply command
+        parsed = self._parse_apply_command(s.strip())
+        if parsed is None:
+            self._sink.write_message_line(
+                f"Invalid apply syntax. Use: apply out = Transform(Model1, ...)",
+                SeverityKind.Warning,
+            )
+            return
+
+        lhs_names, transform_name, rhs_args = parsed
+
+        # Resolve the transform module
+        transform_node = self._modules.get(transform_name)
+        if transform_node is None:
+            self._sink.write_message_line(
+                f"Module '{transform_name}' not found", SeverityKind.Error
+            )
+            return
+
+        from formula.api.constants import NodeKind
+
+        nk = getattr(transform_node, "node_kind", None)
+
+        if nk == NodeKind.Model:
+            # Model application (identity copy)
+            self._apply_model_copy(transform_name, transform_node, lhs_names)
+            return
+
+        if nk != NodeKind.Transform:
+            self._sink.write_message_line(
+                f"'{transform_name}' is not a Transform (is {nk})",
+                SeverityKind.Error,
+            )
+            return
+
+        # Validate argument count matches transform inputs
+        inputs = list(transform_node.inputs)
+        if len(rhs_args) != len(inputs):
+            self._sink.write_message_line(
+                f"Transform '{transform_name}' expects {len(inputs)} input(s), "
+                f"got {len(rhs_args)}",
+                SeverityKind.Error,
+            )
+            return
+
+        # Validate output count matches transform outputs
+        outputs = list(transform_node.outputs)
+        if len(lhs_names) != len(outputs):
+            self._sink.write_message_line(
+                f"Transform '{transform_name}' produces {len(outputs)} output(s), "
+                f"got {len(lhs_names)} name(s)",
+                SeverityKind.Error,
+            )
+            return
+
+        # Resolve input model arguments
+        input_models: Dict[str, Any] = {}  # rename -> model_node
+        for i, arg_name in enumerate(rhs_args):
+            model_node = self._modules.get(arg_name)
+            if model_node is None:
+                self._sink.write_message_line(
+                    f"Model '{arg_name}' not found", SeverityKind.Error
+                )
+                return
+            if getattr(model_node, "node_kind", None) != NodeKind.Model:
+                self._sink.write_message_line(
+                    f"'{arg_name}' is not a Model", SeverityKind.Error
+                )
+                return
+
+            param = inputs[i]
+            rename = getattr(param.type, "rename", None) or f"_arg{i}"
+            input_models[rename] = model_node
+
+        # Execute the transform using the direct solver infrastructure
+        self._execute_transform(
+            transform_name, transform_node, input_models,
+            outputs, lhs_names,
+        )
+
+    def _parse_apply_command(self, s: str) -> Optional[tuple]:
+        """Parse 'out1, out2 = TransformName(arg1, arg2)' syntax.
+
+        Returns (lhs_names, transform_name, rhs_args) or None.
+        """
+        # Split on '='
+        eq_pos = s.find("=")
+        if eq_pos < 0:
+            # No '=': treat as 'result = s()'
+            # Try parsing as just TransformName(args)
+            paren_pos = s.find("(")
+            if paren_pos < 0:
+                # Just a module name (model copy)
+                return (["result"], s.strip(), [])
+            transform_name = s[:paren_pos].strip()
+            args_str = s[paren_pos + 1:].rstrip(")")
+            rhs_args = [a.strip() for a in args_str.split(",") if a.strip()]
+            return (["result"], transform_name, rhs_args)
+
+        lhs = s[:eq_pos].strip()
+        rhs = s[eq_pos + 1:].strip()
+
+        # Parse LHS: comma-separated output names
+        lhs_names = [n.strip() for n in lhs.split(",") if n.strip()]
+        if not lhs_names:
+            return None
+
+        # Parse RHS: TransformName(arg1, arg2, ...)
+        paren_pos = rhs.find("(")
+        if paren_pos < 0:
+            # No parens: treat as model name (identity)
+            return (lhs_names, rhs.strip(), [])
+
+        transform_name = rhs[:paren_pos].strip()
+        args_str = rhs[paren_pos + 1:].rstrip(")")
+        rhs_args = [a.strip() for a in args_str.split(",") if a.strip()]
+
+        return (lhs_names, transform_name, rhs_args)
+
+    def _apply_model_copy(
+        self, model_name: str, model_node: Any, lhs_names: List[str]
+    ) -> None:
+        """Handle apply of a model (identity copy)."""
+        if not lhs_names:
+            return
+        output_name = lhs_names[0]
+        # Register the model under the new name
+        self._modules[output_name] = model_node
         self._sink.write_message_line(
-            f"Transform application is not yet implemented", SeverityKind.Warning
+            f"Copied model '{model_name}' as '{output_name}'"
+        )
+
+    def _execute_transform(
+        self,
+        transform_name: str,
+        transform_node: Any,
+        input_models: Dict[str, Any],
+        outputs: list,
+        lhs_names: List[str],
+    ) -> None:
+        """Execute a transform using the compiled pipeline.
+
+        Ported from C# ApplyResult.Start for transforms:
+        1. Get compiled RuleTable from the transform
+        2. Build FactSets from input model facts
+        3. Create Executer with rules + input facts
+        4. Execute to fixpoint
+        5. Collect output facts by namespace
+        """
+        from formula.cli._direct_solver import (
+            _build_ctx, _derive_instances, _get_recursion_bound,
+            _enumerate_body, _resolve, Ctx, Binding, CtorInfo, FieldTypeInfo,
+        )
+        from formula.api.nodes import FuncTerm, Id, Cnst, Find
+        from formula.api.constants import NodeKind
+        from fractions import Fraction
+
+        self._sink.write_message_line(
+            f"Applying transform '{transform_name}'...", SeverityKind.Info
+        )
+
+        # Build a unified context that includes all input model facts
+        # with namespace prefixes, plus the transform's own rules
+        ctx = Ctx()
+
+        # Collect all domain type declarations from input domains
+        # (needed for constructor info)
+        for rename, model_node in input_models.items():
+            domain_name = model_node.domain.name
+            domain_node = self._modules.get(domain_name)
+            if domain_node is None:
+                self._sink.write_message_line(
+                    f"Domain '{domain_name}' not found for model", SeverityKind.Error
+                )
+                return
+
+            # Register constructors with namespace prefix
+            from formula.api.nodes import ConDecl
+            for td in domain_node.type_decls:
+                if isinstance(td, ConDecl):
+                    # Register both prefixed and unprefixed
+                    fields = []
+                    for f in td.fields:
+                        from formula.cli._direct_solver import _extract_type_info
+                        fields.append((f.name, _extract_type_info(f.type)))
+                    prefixed_name = f"{rename}.{td.name}"
+                    ctx.ctors[prefixed_name] = CtorInfo(prefixed_name, fields, td.is_new)
+                    if td.name not in ctx.ctors:
+                        ctx.ctors[td.name] = CtorInfo(td.name, fields, td.is_new)
+
+            # Load model facts with namespace prefix
+            for fact in model_node.facts:
+                match = fact.match
+                if isinstance(match, FuncTerm) and isinstance(match.function, Id):
+                    ctor_name = match.function.name
+                    prefixed_name = f"{rename}.{ctor_name}"
+                    bname = fact.binding.name if fact.binding else None
+
+                    ci = ctx.ctors.get(prefixed_name) or ctx.ctors.get(ctor_name)
+                    fields = []
+                    for i, arg in enumerate(match.args):
+                        if isinstance(arg, Cnst):
+                            from formula.cli._direct_solver import _cnst_to_z3
+                            fields.append(_cnst_to_z3(arg))
+                        elif isinstance(arg, Id):
+                            from formula.cli._direct_solver import _make_z3_var
+                            import z3
+                            fti = FieldTypeInfo("Integer")
+                            if ci and i < len(ci.fields):
+                                _, fti = ci.fields[i]
+                            if arg.name not in ctx.z3_vars:
+                                var, constraint = _make_z3_var(arg.name, fti)
+                                ctx.z3_vars[arg.name] = var
+                                if constraint is not None:
+                                    ctx.type_constraints.append(constraint)
+                            fields.append(ctx.z3_vars[arg.name])
+                        else:
+                            fields.append(None)
+
+                    b = Binding(prefixed_name, fields, bname)
+                    ctx.base.setdefault(prefixed_name, []).append(b)
+                    if bname:
+                        ctx.by_bname[bname] = b
+
+        # Index transform rules by head name
+        for rule in transform_node.rules:
+            for h in rule.heads:
+                nm = None
+                if isinstance(h, FuncTerm) and isinstance(h.function, Id):
+                    nm = h.function.name
+                elif isinstance(h, Id):
+                    nm = h.name
+                if nm:
+                    ctx.rules_by_head.setdefault(nm, []).append(rule)
+
+        # Register output constructors
+        for param in outputs:
+            out_rename = getattr(param.type, "rename", None)
+            domain_name = getattr(param.type, "name", None)
+            if out_rename and domain_name:
+                domain_node = self._modules.get(domain_name)
+                if domain_node:
+                    from formula.api.nodes import ConDecl
+                    for td in domain_node.type_decls:
+                        if isinstance(td, ConDecl):
+                            fields = []
+                            for f in td.fields:
+                                from formula.cli._direct_solver import _extract_type_info
+                                fields.append((f.name, _extract_type_info(f.type)))
+                            prefixed_name = f"{out_rename}.{td.name}"
+                            ctx.ctors[prefixed_name] = CtorInfo(
+                                prefixed_name, fields, td.is_new
+                            )
+
+        # Derive instances from transform rules
+        derivable_heads = set(ctx.rules_by_head.keys())
+        recursion_bound = 20  # Higher bound for transforms
+
+        for _ in range(recursion_bound):
+            added = False
+            for name in sorted(derivable_heads):
+                from formula.cli._direct_solver import _derive_for
+                new = _derive_for(name, ctx)
+                if new:
+                    ctx.derived.setdefault(name, []).extend(new)
+                    added = True
+            if not added:
+                break
+
+        # Collect output facts by namespace
+        all_output_facts: Dict[str, List[str]] = {}
+
+        for i, param in enumerate(outputs):
+            out_rename = getattr(param.type, "rename", None)
+            out_name = lhs_names[i] if i < len(lhs_names) else f"out{i}"
+
+            if not out_rename:
+                continue
+
+            output_facts: List[str] = []
+            for ctor_name in sorted(set(list(ctx.base.keys()) + list(ctx.derived.keys()))):
+                if ctor_name.startswith(f"{out_rename}."):
+                    # Strip the namespace prefix for display
+                    short_name = ctor_name[len(out_rename) + 1:]
+                    for inst in ctx.all_of(ctor_name):
+                        fields_str = ", ".join(str(f) for f in inst.fields)
+                        output_facts.append(f"{short_name}({fields_str})")
+
+            all_output_facts[out_name] = output_facts
+
+        # Display results
+        total = 0
+        for out_name, facts in all_output_facts.items():
+            if facts:
+                self._sink.write_message_line(f"  Output '{out_name}':")
+                for f in facts:
+                    self._sink.write_message_line(f"    {f}")
+                    total += 1
+            else:
+                self._sink.write_message_line(f"  Output '{out_name}': (empty)")
+
+        # Register as apply task
+        apply_data = {
+            "transform": transform_name,
+            "transform_node": transform_node,
+            "input_models": input_models,
+            "output_facts": all_output_facts,
+        }
+        task_id = self._task_manager.start_task(
+            TaskKind.Apply,
+            task=None,
+            result=total > 0,
+            statistics=apply_data,
+        )
+        self._sink.write_message_line(
+            f"Applied (task {task_id}): {total} output facts"
         )
 
     def _do_stats(self, s: str) -> None:

@@ -206,24 +206,115 @@ class StepResult:
             self._execute_tsystem_step(step, tsystem)
 
     def _execute_model_step(self, step: Any, tsystem: CoreTSystem) -> None:
-        """Execute a step that produces a model (copy facts)."""
-        # In a full implementation this would copy facts from the model's
-        # fact set into the result map.
-        pass
+        """Execute a step that produces a model (copy facts).
+
+        Ported from C# StepResult.Start (Model case):
+        Copies all facts from the model's compiled FactSet into the result map.
+        """
+        mod_data = getattr(step, "module_data", None)
+        if mod_data is None:
+            return
+
+        final_output = getattr(mod_data, "final_output", None)
+        if final_output is None:
+            return
+
+        # Copy facts from the model's FactSet
+        if hasattr(final_output, "facts") and hasattr(final_output, "index"):
+            src_facts = final_output.facts
+            if step.lhs_names:
+                output_name = step.lhs_names[0]
+                new_facts = set()
+                for f in src_facts:
+                    new_facts.add(f)
+                self._result_map.set_result(
+                    output_name, FactSet(final_output.index, new_facts)
+                )
 
     def _execute_transform_step(self, step: Any, tsystem: CoreTSystem) -> None:
-        """Execute a step that runs a transform."""
-        # Full implementation would:
-        # 1. Create a new TermIndex from the transform's symbol table
-        # 2. Clone the rule table
-        # 3. Instantiate model and value parameters
-        # 4. Run the Executer
-        # 5. Project outputs into the result map
-        pass
+        """Execute a step that runs a transform.
+
+        Ported from C# StepResult.Start (Transform case):
+        1. Clone the transform's RuleTable into a new TermIndex
+        2. Build FactSets from input model parameters
+        3. Create an Executer with the cloned rules + input facts
+        4. Execute to fixpoint
+        5. Project output facts into the result map by namespace
+        """
+        mod_data = getattr(step, "module_data", None)
+        if mod_data is None:
+            return
+
+        final_output = getattr(mod_data, "final_output", None)
+        if final_output is None:
+            return
+
+        # Check if final_output is a RuleTable
+        if not isinstance(final_output, RuleTable):
+            return
+
+        # Clone the rule table for this execution
+        clone_index = TermIndex(mod_data.symbol_table) if hasattr(mod_data, "symbol_table") and mod_data.symbol_table else final_output.index
+        cloned_rules = final_output.clone_transform_table(clone_index)
+
+        # Build input FactSets from the result map
+        model_facts = {}
+        for dep in step.dependencies:
+            for ln in dep.lhs_names:
+                fs = self._result_map.get(ln)
+                if fs is not None:
+                    model_facts[ln] = fs
+
+        # Create and run the Executer
+        exe = Executer(
+            cloned_rules,
+            model_facts=model_facts,
+            value_params=self._value_params,
+        )
+        exe.execute()
+
+        # Collect output facts
+        if step.lhs_names:
+            output_name = step.lhs_names[0]
+            output_facts = set()
+            for fact in exe.fixpoint_facts:
+                output_facts.add(fact)
+            self._result_map.set_result(
+                output_name, FactSet(clone_index, output_facts)
+            )
 
     def _execute_tsystem_step(self, step: Any, tsystem: CoreTSystem) -> None:
-        """Execute a step that runs a nested transformation system."""
-        pass
+        """Execute a step that runs a nested transformation system.
+
+        Ported from C# StepResult.Start (TSystem case):
+        Recursively executes the nested TSystem.
+        """
+        mod_data = getattr(step, "module_data", None)
+        if mod_data is None:
+            return
+
+        final_output = getattr(mod_data, "final_output", None)
+        if final_output is None or not isinstance(final_output, CoreTSystem):
+            return
+
+        # Build model params from our result map
+        model_params = {}
+        for dep in step.dependencies:
+            for ln in dep.lhs_names:
+                fs = self._result_map.get(ln)
+                if fs is not None:
+                    model_params[ln] = fs
+
+        # Execute the nested TSystem
+        nested_result = final_output.execute(
+            model_params=model_params,
+            value_params=self._value_params,
+            cancel=self._cancel,
+        )
+
+        # Copy nested results into our result map
+        for name, fs in nested_result.results.results.items():
+            self._result_map.set_result(name, fs)
 
 
 def _get_module_kind(step: Any) -> str:

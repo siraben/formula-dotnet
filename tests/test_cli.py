@@ -3,6 +3,7 @@
 Converted from: Src/Tests/CommandLineTests.cs (partially)
 """
 
+import os
 import pytest
 
 
@@ -284,4 +285,97 @@ def test_solve_after_compilation():
     fix.sink.clear_output()
     fix.run_command("solve pm 1 Mapping.conforms")
     assert fix.get_solve_result()
+    fix.dispose()
+
+
+# ── Transform tests ──────────────────────────────────────────────────
+
+_TRANSFORM_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "Tst", "Tests", "Transform",
+)
+
+
+def _transform_path(name: str) -> str:
+    return os.path.join(_TRANSFORM_DIR, name)
+
+
+def test_transform_load():
+    """Verify that a spec with transforms loads and compiles."""
+    from tests.conftest import FormulaFixture
+    fix = FormulaFixture()
+    path = _transform_path("tests.4ml")
+    if not os.path.isfile(path):
+        pytest.skip("Transform tests.4ml not found")
+    fix.run_command(f"load {path}")
+    assert fix.get_load_result()
+    # Check that transform modules are registered
+    ci = fix._ci
+    assert "Double" in ci._modules
+    assert "Identity" in ci._modules
+    assert "m1" in ci._modules
+    assert "m2" in ci._modules
+    fix.dispose()
+
+
+def test_transform_identity_apply():
+    """Apply the Identity transform: out.N(x) :- in.N(x)."""
+    from tests.conftest import FormulaFixture
+    fix = FormulaFixture()
+    path = _transform_path("tests.4ml")
+    if not os.path.isfile(path):
+        pytest.skip("Transform tests.4ml not found")
+    fix.run_command(f"load {path}")
+    assert fix.get_load_result()
+    fix.sink.clear_output()
+    fix.run_command("apply result = Identity(m1)")
+    output = "\n".join(fix.sink.output)
+    # Should contain the original facts: N(1), N(2), N(3)
+    assert "N(1)" in output
+    assert "N(2)" in output
+    assert "N(3)" in output
+    fix.dispose()
+
+
+def test_transform_double_apply():
+    """Apply the Double transform: out.N(x * 2) :- in.N(x)."""
+    from tests.conftest import FormulaFixture
+    fix = FormulaFixture()
+    path = _transform_path("tests.4ml")
+    if not os.path.isfile(path):
+        pytest.skip("Transform tests.4ml not found")
+    fix.run_command(f"load {path}")
+    assert fix.get_load_result()
+    fix.sink.clear_output()
+    fix.run_command("apply result = Double(m1)")
+    output = "\n".join(fix.sink.output)
+    # N(1) → N(2), N(2) → N(4), N(3) → N(6)
+    assert "N(2)" in output
+    assert "N(4)" in output
+    assert "N(6)" in output
+    fix.dispose()
+
+
+def test_transform_apply_parse_errors():
+    """Verify proper error handling for invalid apply commands."""
+    from tests.conftest import FormulaFixture
+    fix = FormulaFixture()
+    path = _transform_path("tests.4ml")
+    if not os.path.isfile(path):
+        pytest.skip("Transform tests.4ml not found")
+    fix.run_command(f"load {path}")
+    assert fix.get_load_result()
+
+    # Wrong number of args
+    fix.sink.clear_output()
+    fix.run_command("apply result = Double(m1, m2)")
+    output = "\n".join(fix.sink.output)
+    assert "expects 1 input" in output
+
+    # Module not found
+    fix.sink.clear_output()
+    fix.run_command("apply result = NonExistent(m1)")
+    output = "\n".join(fix.sink.output)
+    assert "not found" in output
+
     fix.dispose()

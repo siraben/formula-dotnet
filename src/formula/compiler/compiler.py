@@ -547,6 +547,7 @@ class Compiler:
                 NodeKind.Transform,
                 NodeKind.TSystem,
                 NodeKind.Model,
+                NodeKind.Machine,
             ):
                 continue
 
@@ -575,6 +576,11 @@ class Compiler:
             flags.clear()
 
             # -- Build final output (kind-dependent) -------------------------
+            if nk == NodeKind.Machine:
+                # Machines are not compiled yet (matches C# behavior)
+                mod_data.passed_phase(PhaseKind.Compiled, None)
+                continue
+
             if nk == NodeKind.Model:
                 fact_set = FactSet(mod_data)
                 if fact_set.validate(flags, self._cancel):
@@ -650,6 +656,7 @@ class Compiler:
                 NodeKind.Transform,
                 NodeKind.TSystem,
                 NodeKind.Model,
+                NodeKind.Machine,
             ):
                 results.append((child, None))
         return results
@@ -669,6 +676,7 @@ class Compiler:
             NodeKind.Transform,
             NodeKind.TSystem,
             NodeKind.Model,
+            NodeKind.Machine,
         )
 
     @staticmethod
@@ -736,6 +744,14 @@ class Compiler:
             mod_name = getattr(module_ast, "name", "")
             root_ns = symbol_table.make_namespace(mod_name) if mod_name else symbol_table.root
 
+            # For transforms: import domain types under param rename namespaces
+            # Matches C# RegisterTransParamTypes
+            nk = getattr(module_ast, "node_kind", None)
+            if nk == NodeKind.Transform:
+                Compiler._register_transform_param_types(
+                    module_ast, symbol_table, root_ns, mod_data, flags
+                )
+
             # Walk type declarations
             type_decls = getattr(module_ast, "type_decls", [])
             for td in type_decls:
@@ -800,9 +816,121 @@ class Compiler:
             return _SymbolTableStub(mod_data)
 
     @staticmethod
+    def _register_transform_param_types(
+        transform_ast: Any,
+        symbol_table: Any,
+        root_ns: Any,
+        mod_data: Any,
+        flags: List[Flag],
+    ) -> None:
+        """
+        For transforms, import constructor/map types from input and output
+        domain parameters under their rename namespaces.
+
+        E.g., for ``transform T (in:: D) returns (out:: D)``, imports
+        all types from domain D under namespaces ``in`` and ``out`` so
+        that ``in.Ctor`` and ``out.Ctor`` are resolvable.
+
+        Ported from C# RuleTable.RegisterTransParamTypes.
+        """
+        from formula.common.symbol_types import MapKind as SymMapKind
+
+        all_params: list = []
+        for p in getattr(transform_ast, "inputs", []):
+            all_params.append(p)
+        for p in getattr(transform_ast, "outputs", []):
+            all_params.append(p)
+
+        for param in all_params:
+            param_type = getattr(param, "type", None)
+            if param_type is None:
+                continue
+
+            # Get the rename (namespace prefix) and domain name
+            rename = getattr(param_type, "rename", None)
+            domain_name = getattr(param_type, "name", None)
+            if not rename or not domain_name:
+                continue
+
+            # Resolve the domain module to find its types
+            # Try via compiler_data (Location) on the ModRef
+            domain_ast = None
+            cd = getattr(param_type, "compiler_data", None)
+            if cd is not None and hasattr(cd, "ast"):
+                domain_ast = cd.ast
+
+            # Fallback: look through the program's children
+            if domain_ast is None:
+                source = getattr(mod_data, "source", None)
+                program = getattr(source, "program", None) if source else None
+                if program is not None:
+                    for child in getattr(program, "children", []):
+                        if getattr(child, "name", None) == domain_name:
+                            domain_ast = child
+                            break
+
+            if domain_ast is None:
+                continue
+
+            # Create namespace for this rename prefix directly under root
+            # so that qualified names like "in.N" resolve via root → "in" → "N"
+            ns = symbol_table.make_namespace(rename)
+
+            # Import type declarations from the domain under the rename namespace
+            for td in getattr(domain_ast, "type_decls", []):
+                td_nk = getattr(td, "node_kind", None)
+
+                if td_nk == NodeKind.ConDecl:
+                    name = td.name
+                    fields = td.fields
+                    arity = len(fields)
+                    is_new = getattr(td, "is_new", False)
+                    is_sub = getattr(td, "is_sub", False)
+                    con_sym = symbol_table.make_con_symbol(
+                        ns, name, arity, is_new=is_new, is_sub=is_sub
+                    )
+                    for f in fields:
+                        label = getattr(f, "name", None)
+                        if label and label != "_":
+                            symbol_table.register_label(label, con_sym)
+
+                elif td_nk == NodeKind.MapDecl:
+                    name = td.name
+                    dom_fields = td.dom
+                    cod_fields = td.cod
+                    dom_arity = len(dom_fields)
+                    cod_arity = len(cod_fields)
+                    is_partial = getattr(td, "is_partial", False)
+                    api_mk = getattr(td, "map_kind", None)
+                    mk_name = api_mk.name if api_mk is not None else "Fun"
+                    sym_mk = SymMapKind[mk_name] if hasattr(SymMapKind, mk_name) else SymMapKind.Fun
+                    map_sym = symbol_table.make_map_symbol(
+                        ns, name, dom_arity, cod_arity,
+                        map_kind=sym_mk, is_partial=is_partial
+                    )
+                    for f in dom_fields:
+                        label = getattr(f, "name", None)
+                        if label and label != "_":
+                            symbol_table.register_label(label, map_sym)
+                    for f in cod_fields:
+                        label = getattr(f, "name", None)
+                        if label and label != "_":
+                            symbol_table.register_label(label, map_sym)
+
+                elif td_nk == NodeKind.UnnDecl:
+                    name = td.name
+                    symbol_table.make_unn_symbol(ns, name)
+
+    @staticmethod
     def _build_rule_table(mod_data: ModuleData, flags: List[Flag]) -> Any:
         """
         Build a RuleTable for a domain or transform module.
+
+        Ported from C# RuleTable constructor + Compile:
+        1. Create TermIndex from the module's SymbolTable
+        2. Create RuleTable
+        3. Compile AST Rule nodes into CoreRule objects
+        4. Stratify the dependency graph
         """
         from formula.common.rules import RuleTable
         from formula.common.terms import TermIndex
@@ -817,7 +945,10 @@ class Compiler:
 
             index = TermIndex(symbol_table)
             rule_table = RuleTable(index)
-            rule_table.stratify()
+
+            # Compile AST rules into CoreRule objects
+            rule_table.compile_rules(mod_data)
+
             return rule_table
         except Exception as exc:
             flags.append(Flag(
