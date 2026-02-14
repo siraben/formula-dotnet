@@ -34,6 +34,7 @@ from formula.api.nodes import (
     Model,
     ModelFact,
     Node,
+    Range,
     RelConstr,
     Rule,
     Setting,
@@ -43,11 +44,21 @@ from formula.api.nodes import (
 
 # ── Data structures ──────────────────────────────────────────────
 
+class FieldTypeInfo:
+    """Type information for a constructor field, matching C# TypeEmbedder."""
+    __slots__ = ("type_name", "range_min", "range_max")
+
+    def __init__(self, type_name: str = "Integer", range_min: Optional[int] = None, range_max: Optional[int] = None):
+        self.type_name = type_name
+        self.range_min = range_min
+        self.range_max = range_max
+
+
 class CtorInfo:
     """Constructor metadata extracted from domain."""
     __slots__ = ("name", "fields", "is_new")
 
-    def __init__(self, name: str, fields: List[Tuple[Optional[str], str]], is_new: bool):
+    def __init__(self, name: str, fields: List[Tuple[Optional[str], FieldTypeInfo]], is_new: bool):
         self.name = name
         self.fields = fields
         self.is_new = is_new
@@ -89,6 +100,7 @@ class Ctx:
         self.derived: Dict[str, List[Binding]] = {}
         self.by_bname: Dict[str, Binding] = {}
         self.z3_vars: Dict[str, z3.ExprRef] = {}
+        self.type_constraints: List[z3.BoolRef] = []
         self.rules_by_head: Dict[str, List[Rule]] = {}
 
     def all_of(self, ctor: str) -> List[Binding]:
@@ -107,6 +119,44 @@ class Ctx:
         return v
 
 
+# ── Type helpers ──────────────────────────────────────────────────
+
+def _extract_type_info(type_node: Node) -> FieldTypeInfo:
+    """Extract type info from a field's type AST node."""
+    if isinstance(type_node, Id):
+        return FieldTypeInfo(type_node.name)
+    if isinstance(type_node, Range):
+        return FieldTypeInfo("IntRange", int(type_node.lower), int(type_node.upper))
+    return FieldTypeInfo("Any")
+
+
+def _make_z3_var(name: str, type_info: FieldTypeInfo) -> Tuple[z3.ExprRef, Optional[z3.BoolRef]]:
+    """Create a Z3 variable matching C# TypeEmbedder behavior.
+
+    Returns (z3_var, type_constraint_or_None).
+    """
+    tn = type_info.type_name
+    if tn == "Real":
+        return z3.Real(name), None
+    if tn == "Natural":
+        v = z3.Int(name)
+        return v, v >= 0
+    if tn == "PosInteger":
+        v = z3.Int(name)
+        return v, v >= 1
+    if tn == "NegInteger":
+        v = z3.Int(name)
+        return v, v < 0
+    if tn == "IntRange" and type_info.range_min is not None:
+        v = z3.Int(name)
+        constraints = [v >= type_info.range_min]
+        if type_info.range_max is not None:
+            constraints.append(v <= type_info.range_max)
+        return v, z3.And(*constraints) if len(constraints) > 1 else constraints[0]
+    # Default: Integer (also covers String mapped to Int, etc.)
+    return z3.Int(name), None
+
+
 # ── Context building ─────────────────────────────────────────────
 
 def _build_ctx(domain: Domain, model: Model) -> Ctx:
@@ -117,8 +167,7 @@ def _build_ctx(domain: Domain, model: Model) -> Ctx:
         if isinstance(td, ConDecl):
             fields = []
             for f in td.fields:
-                tn = f.type.name if isinstance(f.type, Id) else "Any"
-                fields.append((f.name, tn))
+                fields.append((f.name, _extract_type_info(f.type)))
             ctx.ctors[td.name] = CtorInfo(td.name, fields, td.is_new)
 
     # Add derived ctors from rule heads (if not already declared)
@@ -127,7 +176,7 @@ def _build_ctx(domain: Domain, model: Model) -> Ctx:
             if isinstance(h, FuncTerm) and isinstance(h.function, Id):
                 nm = h.function.name
                 if nm not in ctx.ctors:
-                    ctx.ctors[nm] = CtorInfo(nm, [(None, "Any")] * len(list(h.args)), False)
+                    ctx.ctors[nm] = CtorInfo(nm, [(None, FieldTypeInfo("Any"))] * len(list(h.args)), False)
 
     # Index rules by head name
     for rule in domain.rules:
@@ -164,13 +213,14 @@ def _build_ctx(domain: Domain, model: Model) -> Ctx:
                     fields.append(Ref(nm))
                 else:
                     # Symbolic variable - infer type from constructor field
-                    type_name = "Integer"
+                    fti = FieldTypeInfo("Integer")
                     if ci and i < len(ci.fields):
-                        _, tn = ci.fields[i]
-                        if tn == "Real":
-                            type_name = "Real"
+                        _, fti = ci.fields[i]
                     if nm not in ctx.z3_vars:
-                        ctx.z3_vars[nm] = z3.Real(nm) if type_name == "Real" else z3.Int(nm)
+                        var, constraint = _make_z3_var(nm, fti)
+                        ctx.z3_vars[nm] = var
+                        if constraint is not None:
+                            ctx.type_constraints.append(constraint)
                     fields.append(ctx.z3_vars[nm])
             else:
                 fields.append(None)
@@ -853,6 +903,10 @@ def direct_solve(domain_node, model_node, max_sols, sink) -> Tuple[bool, Optiona
     # Build Z3 solver
     solver = z3.Solver()
     solver.set("timeout", 30000)
+
+    # Add type membership constraints (Natural >= 0, PosInteger >= 1, etc.)
+    for tc in ctx.type_constraints:
+        solver.add(tc)
 
     for c in constraints:
         if isinstance(c, z3.BoolRef):
