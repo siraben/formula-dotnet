@@ -1,0 +1,227 @@
+/* FORMULA 2.0 Web Playground — dark theme */
+
+:root {
+  --bg: #1e1e2e;
+  --bg-panel: #181825;
+  --bg-header: #11111b;
+  --bg-input: #1e1e2e;
+  --fg: #cdd6f4;
+  --fg-dim: #6c7086;
+  --accent: #89b4fa;
+  --accent-hover: #b4d0fb;
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --yellow: #f9e2af;
+  --border: #313244;
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* ── Layout ─────────────────────────────────────────── */
+
+#app {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100vh;
+}
+
+header {
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+header h1 span {
+  color: var(--fg-dim);
+  font-weight: 400;
+  font-size: 13px;
+}
+
+.main-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 0;
+}
+
+@media (max-width: 768px) {
+  .main-panels {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
+}
+
+/* ── Panels ─────────────────────────────────────────── */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+
+.panel:last-child {
+  border-right: none;
+}
+
+.panel-header {
+  background: var(--bg-header);
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* ── Editor ─────────────────────────────────────────── */
+
+#editor {
+  flex: 1;
+  width: 100%;
+  background: var(--bg-panel);
+  color: var(--fg);
+  border: none;
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+  tab-size: 2;
+}
+
+#editor::placeholder {
+  color: var(--fg-dim);
+}
+
+/* ── Output ─────────────────────────────────────────── */
+
+#output-wrap {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg-panel);
+  padding: 12px;
+}
+
+#output {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.out-info { color: var(--fg); }
+.out-warning { color: var(--yellow); }
+.out-error { color: var(--red); }
+.out-success { color: var(--green); }
+
+/* ── Footer / Controls ──────────────────────────────── */
+
+footer {
+  background: var(--bg-header);
+  border-top: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+select, button {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+select:focus, button:focus {
+  outline: 1px solid var(--accent);
+}
+
+button#run-btn {
+  background: var(--accent);
+  color: var(--bg-header);
+  font-weight: 600;
+  padding: 4px 18px;
+  border: none;
+}
+
+button#run-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button#run-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+label {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+#status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+#status.loading {
+  color: var(--yellow);
+}
+
+#status.ready {
+  color: var(--green);
+}
+
+#status.error {
+  color: var(--red);
+}
+
+/* ── Spinner ────────────────────────────────────────── */
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--fg-dim);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

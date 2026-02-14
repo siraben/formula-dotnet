@@ -37,3 +37,6 @@ Thumbs.db
 # Nix
 result
 result-*
+
+# Web playground build artifacts
+web/formula-src.tar.gz

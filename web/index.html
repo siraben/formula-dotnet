@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FORMULA 2.0 Playground</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="coi-serviceworker.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>FORMULA 2.0 <span>Playground</span></h1>
+      <label for="example-select">Examples:</label>
+      <select id="example-select">
+        <option value="">-- select --</option>
+        <option value="Mapping Example">Mapping Example</option>
+        <option value="SEND+MORE=MONEY">SEND+MORE=MONEY</option>
+        <option value="Hello World">Hello World</option>
+      </select>
+    </header>
+
+    <div class="main-panels">
+      <div class="panel">
+        <div class="panel-header">
+          <span>Editor</span>
+          <span style="font-size:11px;text-transform:none">Ctrl+Enter to run</span>
+        </div>
+        <textarea id="editor" spellcheck="false"
+          placeholder="Enter FORMULA 2.0 specification..."></textarea>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <span>Output</span>
+          <button id="clear-btn" style="padding:2px 8px;font-size:11px">Clear</button>
+        </div>
+        <div id="output-wrap">
+          <pre id="output"></pre>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <label for="model-select">Model:</label>
+      <select id="model-select"></select>
+      <label for="domain-select">Domain:</label>
+      <select id="domain-select"></select>
+      <button id="run-btn" disabled>Run</button>
+      <span id="status" class="loading">Initializing...</span>
+    </footer>
+  </div>
+
+  <script>
+    document.getElementById("clear-btn").addEventListener("click", () => {
+      document.getElementById("output").innerHTML = "";
+    });
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>
