@@ -86,6 +86,14 @@ class ReservedOpKind(enum.Enum):
     Relabel = 3
     Find = 4
     TypeRel = 5
+    Conj = 6
+    ConjR = 7
+    Disj = 8
+    Proj = 9
+    PRule = 10
+    CRule = 11
+    Rule = 12
+    Compr = 13
 
 
 class OpKind(enum.Enum):
@@ -130,6 +138,23 @@ class OpKind(enum.Enum):
     AndAll = 37
     Impl = 38
     NotImpl = 39
+    And = 40
+    Or = 41
+    Not = 42
+    OrAll = 43
+    MaxAll = 44
+    MinAll = 45
+    Sum = 46
+    Prod = 47
+    LstLength = 48
+    LstReverse = 49
+    LstFind = 50
+    LstFindAll = 51
+    LstFindAllNot = 52
+    LstGetAt = 53
+    RflIsSubtype = 54
+    RflGetArgType = 55
+    RflGetArity = 56
 
 
 class RelKind(enum.Enum):
@@ -838,8 +863,34 @@ class ConSymb(UserSymbol):
             self._definitions.append(d)
 
     def resolve_types(self, table: Any, flags: List[Any], cancel: Any = None) -> bool:
-        # Placeholder: type resolution requires the full compiler pipeline
-        return True
+        """Resolve type names in field type expressions.
+
+        Matches C# ConSymb.ResolveTypes: for each definition, creates an
+        AppFreeCanUnn for each field's type expression and resolves references.
+        """
+        from formula.common.terms import AppFreeCanUnn
+        result = True
+        for defn in self._definitions:
+            node = defn if not hasattr(defn, 'node') else defn.node
+            fields = getattr(node, 'fields', [])
+            cdefs = []
+            for f in fields:
+                ftype = getattr(f, 'type', None)
+                if ftype is not None:
+                    cdef = AppFreeCanUnn.from_type_ast(table, ftype)
+                    ok = cdef.resolve_types(flags, cancel)
+                    result = result and ok
+                else:
+                    cdef = AppFreeCanUnn()
+                cdefs.append(cdef)
+            if hasattr(node, 'compiler_data'):
+                pass  # don't overwrite
+            else:
+                try:
+                    node.compiler_data = cdefs
+                except AttributeError:
+                    pass
+        return result
 
     def canonize(self, flags: List[Any], cancel: Any = None) -> bool:
         return True
@@ -957,7 +1008,39 @@ class MapSymb(UserSymbol):
             self._definitions.append(d)
 
     def resolve_types(self, table: Any, flags: List[Any], cancel: Any = None) -> bool:
-        return True
+        """Resolve type names in dom/cod field type expressions.
+
+        Matches C# MapSymb.ResolveTypes: processes domain fields first,
+        then codomain fields.
+        """
+        from formula.common.terms import AppFreeCanUnn
+        result = True
+        for defn in self._definitions:
+            node = defn if not hasattr(defn, 'node') else defn.node
+            cdefs = []
+            for f in getattr(node, 'dom', []):
+                ftype = getattr(f, 'type', None)
+                if ftype is not None:
+                    cdef = AppFreeCanUnn.from_type_ast(table, ftype)
+                    ok = cdef.resolve_types(flags, cancel)
+                    result = result and ok
+                else:
+                    cdef = AppFreeCanUnn()
+                cdefs.append(cdef)
+            for f in getattr(node, 'cod', []):
+                ftype = getattr(f, 'type', None)
+                if ftype is not None:
+                    cdef = AppFreeCanUnn.from_type_ast(table, ftype)
+                    ok = cdef.resolve_types(flags, cancel)
+                    result = result and ok
+                else:
+                    cdef = AppFreeCanUnn()
+                cdefs.append(cdef)
+            try:
+                node.compiler_data = cdefs
+            except AttributeError:
+                pass
+        return result
 
     def canonize(self, flags: List[Any], cancel: Any = None) -> bool:
         return True
@@ -1018,7 +1101,25 @@ class UnnSymb(UserSymbol):
             self._definitions.append(d)
 
     def resolve_types(self, table: Any, flags: List[Any], cancel: Any = None) -> bool:
-        return True
+        """Resolve type names in union body expression.
+
+        Matches C# UnnSymb.ResolveTypes: creates a single AppFreeCanUnn
+        from the union body and resolves type references.
+        """
+        from formula.common.terms import AppFreeCanUnn
+        result = True
+        for defn in self._definitions:
+            node = defn if not hasattr(defn, 'node') else defn.node
+            body = getattr(node, 'body', None)
+            if body is not None:
+                cdef = AppFreeCanUnn.from_type_ast(table, body)
+                ok = cdef.resolve_types(flags, cancel)
+                result = result and ok
+                try:
+                    node.compiler_data = cdef
+                except AttributeError:
+                    pass
+        return result
 
     def canonize(self, flags: List[Any], cancel: Any = None) -> bool:
         return True

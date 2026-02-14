@@ -343,7 +343,13 @@ class CoreTSystem:
         cancel: Any = None,
     ) -> StepResult:
         """
-        Execute the transformation system.
+        Execute the transformation system with dependency tracking.
+
+        Matches C# CoreTSystem.Execute: steps are executed in dependency
+        order.  Each step's input model variables must have been produced
+        by a prior step (or provided as input parameters).  The C# version
+        uses Task parallelism; this Python port executes synchronously in
+        topological order.
 
         Returns a ``StepResult`` containing all output models.
         """
@@ -359,16 +365,51 @@ class CoreTSystem:
             for name, fset in model_params.items():
                 result_map.set_result(name, fset)
 
-        # Execute each step in order
-        for step in self._execution_order:
+        # Build a mapping from LHS variable names to the step that produces them,
+        # so we can verify dependencies are satisfied before executing each step.
+        var_to_step: Dict[str, int] = {}
+        completed: Set[int] = set()
+
+        for i, cstep in enumerate(self._execution_order):
+            # Ensure all dependencies (steps that produce our inputs) are done.
+            # Dependencies are already captured in cstep.dependencies, but we
+            # also check that the model variables we need are available.
+            for dep in cstep.dependencies:
+                dep_idx = None
+                for j, s in enumerate(self._execution_order):
+                    if s is dep:
+                        dep_idx = j
+                        break
+                if dep_idx is not None and dep_idx not in completed:
+                    # Dependency not yet executed — execute it first.
+                    # This shouldn't happen if execution_order is topological,
+                    # but handle gracefully.
+                    sr = StepResult(
+                        result_map,
+                        step=self._execution_order[dep_idx],
+                        tsystem=self,
+                        value_params=value_params or {},
+                        cancel=cancel,
+                    )
+                    sr.start()
+                    completed.add(dep_idx)
+                    for ln in self._execution_order[dep_idx].lhs_names:
+                        var_to_step[ln] = dep_idx
+
+            # Execute this step
             step_result = StepResult(
                 result_map,
-                step=step,
+                step=cstep,
                 tsystem=self,
                 value_params=value_params or {},
                 cancel=cancel,
             )
             step_result.start()
+            completed.add(i)
+
+            # Register this step's outputs
+            for ln in cstep.lhs_names:
+                var_to_step[ln] = i
 
         return StepResult(result_map)
 

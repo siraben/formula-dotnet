@@ -506,14 +506,138 @@ class Unifier:
         standardize: bool = True,
     ) -> Tuple[bool, Optional[Term]]:
         """
-        If *t_a* and *t_b* are unifiable, return ``(True, mgu)``.
-        Otherwise return ``(False, None)``.
+        If *t_a* and *t_b* are unifiable, return ``(True, mgu)``
+        with normalized variable names.  Otherwise ``(False, None)``.
+
+        *var_creator(i)* gives a variable for the *i*-th distinct variable
+        (left-to-right) in the mgu, beginning with index 0.
+
+        Matches C# Unifier.IsUnifiable + MkMGU.
         """
-        ok = Unifier.is_unifiable(t_a, t_b, standardize)
-        if not ok:
-            return False, None
-        # Simplified: return t_a as the MGU placeholder
-        return True, t_a
+        assert t_a.owner is t_b.owner
+        index = t_a.owner
+
+        label_a = 0
+        label_b = 1 if standardize else 0
+
+        # -- Phase 1: unification with binding tracking --
+        # StdTerm = (uid, label).  parent implements union-find.
+        # bindings maps a variable's representative to the term it's bound to.
+        parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        bindings: Dict[Tuple[int, int], Tuple[Term, int]] = {}  # rep -> (term, label)
+        pending: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
+        pending.append(((t_a._uid, label_a), (t_b._uid, label_b)))
+
+        def find(x: Tuple[int, int]) -> Tuple[int, int]:
+            while x in parent and parent[x] != x:
+                parent[x] = parent.get(parent[x], parent[x])
+                x = parent[x]
+            return x
+
+        def union(x: Tuple[int, int], y: Tuple[int, int]) -> None:
+            rx, ry = find(x), find(y)
+            if rx != ry:
+                parent[rx] = ry
+                # Merge bindings: if rx had a binding, transfer it
+                if rx in bindings and ry not in bindings:
+                    bindings[ry] = bindings[rx]
+
+        def bind_var(var_std: Tuple[int, int], binding_term: Term, binding_label: int) -> None:
+            """Bind a variable to a data constructor / constant term."""
+            rep = find(var_std)
+            existing = bindings.get(rep)
+            if existing is not None:
+                # Already bound — push pending unification
+                et, el = existing
+                pending.append(((et._uid, el), (binding_term._uid, binding_label)))
+            else:
+                bindings[rep] = (binding_term, binding_label)
+            union(var_std, (binding_term._uid, binding_label))
+
+        while pending:
+            sa, sb = pending.pop()
+            ra = find(sa)
+            rb = find(sb)
+            if ra == rb:
+                continue
+
+            ta = _uid_to_term(t_a, sa[0], sa[1], label_a)
+            tb = _uid_to_term(t_b, sb[0], sb[1], label_b)
+            if ta is None or tb is None:
+                return False, None
+
+            if ta.groundness == Groundness.Ground and tb.groundness == Groundness.Ground:
+                if ta is not tb:
+                    return False, None
+                continue
+
+            if (ta.symbol.is_data_constructor or ta.symbol.is_non_var_constant) and \
+               (tb.symbol.is_data_constructor or tb.symbol.is_non_var_constant):
+                if ta.symbol is not tb.symbol:
+                    return False, None
+                union(sa, sb)
+                for i in range(ta.symbol.arity):
+                    pending.append(
+                        ((ta.args[i]._uid, sa[1]), (tb.args[i]._uid, sb[1]))
+                    )
+            elif ta.symbol.is_variable:
+                if tb.symbol.is_data_constructor or tb.symbol.is_non_var_constant:
+                    bind_var(sa, tb, sb[1])
+                else:
+                    union(sa, sb)
+            elif tb.symbol.is_variable:
+                if ta.symbol.is_data_constructor or ta.symbol.is_non_var_constant:
+                    bind_var(sb, ta, sa[1])
+                else:
+                    union(sb, sa)
+            else:
+                union(sa, sb)
+
+        # -- Phase 2: construct MGU by traversing t_a --
+        # Maps each normalized variable (by std-term rep) to a fresh var.
+        var_map: Dict[Tuple[int, int], Term] = {}
+
+        def mk_mgu(term: Term, label: int) -> Term:
+            if term.groundness == Groundness.Ground:
+                return term
+
+            if not term.symbol.is_variable:
+                # Data constructor: recurse into arguments
+                new_args = []
+                changed = False
+                for a in term.args:
+                    a2 = mk_mgu(a, label)
+                    new_args.append(a2)
+                    if a2 is not a:
+                        changed = True
+                if not changed:
+                    return term
+                return index.mk_apply(term.symbol, new_args)
+
+            # Variable: check if it has a binding
+            std = (term._uid, label)
+            rep = find(std)
+            bound = bindings.get(rep)
+            if bound is not None:
+                bound_term, bound_label = bound
+                if bound_term.symbol.is_variable:
+                    # Bound to another variable — normalize
+                    bound_std = (bound_term._uid, bound_label)
+                    bound_rep = find(bound_std)
+                    if bound_rep not in var_map:
+                        var_map[bound_rep] = var_creator(len(var_map))
+                    return var_map[bound_rep]
+                else:
+                    # Bound to a data constructor: recurse
+                    return mk_mgu(bound_term, bound_label)
+
+            # Free variable: normalize
+            if rep not in var_map:
+                var_map[rep] = var_creator(len(var_map))
+            return var_map[rep]
+
+        mgu = mk_mgu(t_a, label_a)
+        return True, mgu
 
 
 def _uid_to_term(root: Term, uid: int, label: int, root_label: int) -> Optional[Term]:

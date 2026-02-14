@@ -242,10 +242,33 @@ class Renderer:
     def _parse_data_term(self, text: str, blame: Any) -> Any:
         """
         Re-parse a rendered string into an AST node.
-        Placeholder: in the full implementation this calls
-        ``Factory.Instance.ParseDataTerm()``.
+
+        Matches C# Renderer's call to ``Factory.Instance.ParseDataTerm()``:
+        wraps the term text in a minimal program, parses it, and extracts
+        the resulting AST node.
         """
-        # Return a synthetic Cnst node wrapping the rendered string
+        from formula.api.nodes import ProgramName
+        from formula.api.parser.parser import Parser
+
+        # Wrap the term text as a model fact inside a minimal domain + model
+        wrapper = f"domain __RD__ {{\n  __r ::= new (any Any).\n}}\nmodel __RM__ of __RD__ {{\n  {text}\n}}"
+        parser = Parser()
+        ok, parse_result = parser.parse_text(ProgramName("__rendered__"), wrapper)
+
+        if not ok or not parse_result.succeeded:
+            # Fall back to synthetic node on parse failure
+            return _RenderedNode(text, blame)
+
+        # Extract the parsed term from the model's first fact
+        program = parse_result.program
+        for mod in program.modules:
+            if hasattr(mod, "facts"):
+                for fact in mod.facts:
+                    match = getattr(fact, "match", None)
+                    if match is not None:
+                        return match
+
+        # Fallback if extraction fails
         return _RenderedNode(text, blame)
 
     @staticmethod

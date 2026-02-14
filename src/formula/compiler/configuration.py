@@ -93,7 +93,28 @@ class Location:
 
     @staticmethod
     def compare(a: "Location", b: "Location") -> int:
-        return 0  # placeholder
+        """Three-way comparison matching C# Location.Compare semantics."""
+        if a.ast is None:
+            return 0 if b.ast is None else -1
+        if b.ast is None:
+            return 1
+        if a.ast is b.ast:
+            return 0
+        # Compare by program name
+        pa = str(a.program.name) if a.program and hasattr(a.program, "name") else ""
+        pb = str(b.program.name) if b.program and hasattr(b.program, "name") else ""
+        if pa < pb:
+            return -1
+        if pa > pb:
+            return 1
+        # Compare by span (source position)
+        sa = getattr(a.ast, "span", None)
+        sb = getattr(b.ast, "span", None)
+        if sa is not None and sb is not None:
+            from formula.api.nodes import Span
+            return Span.compare(sa, sb)
+        # Fall back to id-based ordering
+        return -1 if id(a.ast) < id(b.ast) else (1 if id(a.ast) > id(b.ast) else 0)
 
 
 @dataclass
@@ -691,7 +712,74 @@ class Configuration:
         return True
 
     def _register_locals(self, flags: List[Flag]) -> bool:
-        """Register local modules (step/update). Placeholder."""
+        """Register local modules from step/update equations and input signatures.
+
+        For TSystem and Machine node kinds, walks the AST to register:
+        - Param nodes whose type is a ModRef (registers the ModRef's rename)
+        - Step LHS Id names
+        - Update state Id names
+
+        Matches C# Configuration.RegisterLocals.
+        """
+        node = self.attached_ast
+        nk = getattr(node, "node_kind", None)
+        if nk != NodeKind.TSystem and nk != NodeKind.Machine:
+            return True
+
+        succeeded = True
+
+        # Register params whose type is a ModRef
+        params: list = []
+        if hasattr(node, "inputs"):
+            params.extend(node.inputs)
+        if hasattr(node, "outputs"):
+            params.extend(node.outputs)
+        for p in params:
+            p_type = getattr(p, "type", None)
+            if p_type is not None and getattr(p_type, "node_kind", None) == NodeKind.ModRef:
+                rename = getattr(p_type, "rename", None)
+                if rename:
+                    if not self._register_local(rename, Location(ast=p), flags):
+                        succeeded = False
+
+        # Register step LHS names
+        steps: list = []
+        if hasattr(node, "steps"):
+            steps.extend(node.steps)
+        if hasattr(node, "boot_sequence"):
+            steps.extend(node.boot_sequence)
+        for step in steps:
+            loc = Location(ast=step)
+            for lhs_id in step.lhs:
+                if not self._register_local(lhs_id.name, loc, flags):
+                    succeeded = False
+
+        # Register update state names
+        updates: list = []
+        if hasattr(node, "initials"):
+            updates.extend(node.initials)
+        if hasattr(node, "nexts"):
+            updates.extend(node.nexts)
+        for update in updates:
+            loc = Location(ast=update)
+            for state_id in update.states:
+                if not self._register_local(state_id.name, loc, flags):
+                    succeeded = False
+
+        return succeeded
+
+    def _register_local(self, name: str, loc: Location, flags: List[Flag]) -> bool:
+        """Register a single local name. Returns False on duplicate with a module."""
+        if name in self._modules:
+            other = self._modules[name]
+            flags.append(self._mk_duplicate_module_flag(name, other.ast, loc.ast))
+            return False
+
+        locs = self._locals.get(name)
+        if locs is None:
+            locs = set()
+            self._locals[name] = locs
+        locs.add(loc)
         return True
 
     def _create_plugin_instances(

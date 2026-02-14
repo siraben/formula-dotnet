@@ -512,9 +512,17 @@ class ConstraintSystem:
             # Merge
             merged = rep_a.union(rep_b)
 
-            # If both have types, we would intersect them (simplified here)
+            # If both have types, intersect them via TermIndex
             if rep_a.type is not None and rep_b.type is not None:
-                merged.type = rep_a.type  # placeholder: type intersection
+                if self._index is not None:
+                    intr = self._index.mk_intersection(rep_a.type, rep_b.type)
+                    if intr is None:
+                        # Empty intersection: type error
+                        merged.type = rep_a.type
+                    else:
+                        merged.type = intr
+                else:
+                    merged.type = rep_a.type
             elif rep_b.type is not None:
                 merged.type = rep_b.type
 
@@ -522,13 +530,72 @@ class ConstraintSystem:
 
     def _notify_type_change(self, cls: CongruenceClass) -> None:
         """
-        When a class's type changes, check if this implies equalities
-        with parent classes.
+        When a class's type changes, propagate the change to parent
+        classes (data-constructor applications whose args include this
+        class).
+
+        Matches C# ConstraintSystem.NotifyTypeChange + CongruenceClass.Propagate.
         """
         if self._active_eq_stack is None:
             return
-        # In the full implementation this would propagate data-constructor
-        # argument types.  Placeholder for now.
+        # Propagate: each parent class that uses this class as an argument
+        # may need its type recomputed.
+        for parent_cls in cls.parent_classes:
+            rep = parent_cls.find()
+            if rep.type is not None and self._index is not None:
+                # Recompute the parent's type from its members' argument types
+                new_type = self._compute_class_type(rep)
+                if new_type is not None and new_type is not rep.type:
+                    rep.type = new_type
+
+    def _compute_class_type(self, cls: CongruenceClass) -> Any:
+        """
+        Compute the maximal type containing the types of all members.
+
+        Matches C# CongruenceClass.ComputeClassType.
+        For each member term in the class:
+        - Base constants: intersect the constant's type with current type.
+        - Data constructors: build a type term from arg types, intersect.
+        - Variables: skip (they don't constrain the type).
+        """
+        if self._index is None:
+            return cls.type
+        current_type = cls.type
+        for member in cls.members:
+            member_term = member
+            if hasattr(member_term, "symbol"):
+                sym = member_term.symbol
+                kind = getattr(sym, "kind", None)
+                if kind is None:
+                    continue
+                from formula.common.symbol_types import SymbolKind
+                if kind == SymbolKind.UserCnstSymb and getattr(sym, "is_variable", False):
+                    continue  # Variables don't constrain the type
+                if kind == SymbolKind.BaseCnstSymb or (
+                    kind == SymbolKind.UserCnstSymb and not getattr(sym, "is_variable", False)
+                ):
+                    if current_type is not None:
+                        intr = self._index.mk_intersection(member_term, current_type)
+                        if intr is None:
+                            return None
+                        current_type = intr
+                elif kind in (SymbolKind.ConSymb, SymbolKind.MapSymb):
+                    args = []
+                    for a in member_term.args:
+                        a_cls = self._classes.get(a)
+                        if a_cls is not None:
+                            args.append(a_cls.find().type or a)
+                        else:
+                            args.append(a)
+                    other = self._index.mk_apply(sym, args)
+                    if current_type is not None:
+                        intr = self._index.mk_intersection(other, current_type)
+                        if intr is None:
+                            return None
+                        current_type = intr
+                    else:
+                        current_type = other
+        return current_type
 
     # -- Orientation validation ----------------------------------------------
 
@@ -610,13 +677,42 @@ class ConstraintSystem:
         self, node: Any, success: SuccessToken, flags: List[Flag]
     ) -> Any:
         """
-        Walk a type expression (the right-hand side of ``:``), building
-        terms in the index.  Returns the resulting type term or ``None``
-        on error.
+        Walk a type expression (the right-hand side of ``:``) and resolve
+        it to a type term via the TermIndex and SymbolTable.
+
+        Matches C# ConstraintSystem's handling of RelKind.Typ constraints:
+        resolves the type name to a UserSymbol, then creates the canonical
+        type term.
         """
-        # Simplified: in full implementation this recursively builds
-        # a type term from the AST via TermIndex.
-        return node  # placeholder
+        if self._index is None:
+            return node
+
+        # If it's an Id node with a name, resolve via symbol table
+        name = getattr(node, "name", None)
+        nk = getattr(node, "node_kind", None)
+
+        if nk == NodeKind.Id and name is not None:
+            from formula.common.symbol_types import SymbolKind
+            sym_table = self._index.symbol_table
+            resolved = sym_table.resolve(name) if hasattr(sym_table, "resolve") else None
+            if resolved is None:
+                return node
+
+            kind = getattr(resolved, "kind", None)
+            if kind == SymbolKind.ConSymb:
+                sort_sym = getattr(resolved, "sort_symbol", None)
+                if sort_sym is not None:
+                    return self._index.mk_apply(sort_sym, [])
+            elif kind == SymbolKind.MapSymb:
+                sort_sym = getattr(resolved, "sort_symbol", None)
+                if sort_sym is not None:
+                    return self._index.mk_apply(sort_sym, [])
+            elif kind == SymbolKind.UnnSymb:
+                return self._index.get_canonical_term(resolved, 0)
+            elif kind == SymbolKind.BaseSortSymb:
+                return self._index.mk_apply(resolved, [])
+
+        return node
 
     def _get_body_conjuncts(self) -> list:
         """Extract the conjunct nodes from the body AST."""

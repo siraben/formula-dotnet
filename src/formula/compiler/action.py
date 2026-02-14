@@ -313,12 +313,12 @@ class ActionSet:
 
         self._actions: List[Action] = []
 
+        from formula.common.terms import TypeEnvironment
         if compr_data is None:
-            self.type_environment: Any = _TypeEnvironmentStub(ast, index)
+            self.type_environment: Any = TypeEnvironment(ast, index)
         else:
-            self.type_environment = _TypeEnvironmentStub(
-                compr_data.node, index, parent=compr_data.owner.type_environment
-            )
+            parent_te = compr_data.owner.type_environment
+            self.type_environment = parent_te.add_child(compr_data.node)
 
         self.is_compiled: LiftedBool = LiftedBool.Unknown
 
@@ -526,26 +526,3 @@ class _TrueBody:
         return []
 
 
-class _TypeEnvironmentStub:
-    """
-    Placeholder TypeEnvironment until the full common/terms layer is available.
-    """
-
-    def __init__(self, node: Any, index: Any, parent: Any = None) -> None:
-        self.node = node
-        self.index = index
-        self.parent = parent
-        self._types: dict = {}
-
-    def set_type(self, var: Any, type_term: Any) -> None:
-        self._types[var] = type_term
-
-    def get_type(self, var: Any) -> Any:
-        return self._types.get(var)
-
-    def add_child(self, node: Any) -> "_TypeEnvironmentStub":
-        return _TypeEnvironmentStub(node, self.index, parent=self)
-
-    def join_types(self) -> None:
-        """Join (widen) types across all actions. Placeholder."""
-        pass

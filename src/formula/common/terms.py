@@ -686,14 +686,96 @@ class TermIndex:
         """
         Compute the intersection of two type terms.
         Returns None if the intersection is empty.
+
+        Matches C# TermIndex.MkIntersection:
+        1. If either is the canonical "any" type, return the other.
+        2. If either is ground, check ground membership.
+        3. Otherwise, delegate to BinnedUnion.intersect().
         """
-        # Delegate to BinnedUnion for the full logic.
-        # Simplified: if both are the same, return it.
         if t1 is t2:
             return t1
-        # For a full implementation, the BinnedUnion logic from the C# code
-        # would be used here. This is a placeholder.
-        return t1
+
+        # Fast path: ground terms
+        if t1.groundness == Groundness.Ground:
+            # Check if t1 is a member of type t2
+            if self._is_ground_member(t2, t1):
+                return t1
+            return None
+        if t2.groundness == Groundness.Ground:
+            if self._is_ground_member(t1, t2):
+                return t2
+            return None
+
+        # Full intersection via BinnedUnion
+        unn = BinnedUnion(t1)
+        return unn.intersect(BinnedUnion(t2))
+
+    def _is_ground_member(self, type_term: Term, ground_term: Term) -> bool:
+        """Check if a ground term is a member of a type term.
+
+        Matches C# TermIndex.IsGroundMember.
+        """
+        unn_symb = self.type_union_symbol
+        rng_symb = self.range_symbol
+
+        for t in type_term.enumerate(
+            lambda x: x.args if x.symbol is unn_symb else None
+        ):
+            if t is ground_term:
+                return True
+            if t.symbol is unn_symb:
+                continue
+            # Range check for numeric constants
+            if t.symbol is rng_symb and ground_term.symbol.kind == SymbolKind.BaseCnstSymb:
+                cnst = ground_term.symbol
+                if cnst.cnst_kind == CnstKind.Numeric:
+                    val = cnst.raw
+                    lo = t.args[0].symbol.raw
+                    hi = t.args[1].symbol.raw
+                    if lo <= val <= hi:
+                        return True
+            # Sort membership check
+            if t.symbol.kind == SymbolKind.BaseSortSymb:
+                sort_kind = t.symbol.sort_kind
+                if ground_term.symbol.kind == SymbolKind.BaseCnstSymb:
+                    cnst = ground_term.symbol
+                    if cnst.cnst_kind == CnstKind.Numeric:
+                        val = cnst.raw
+                        if sort_kind == BaseSortKind.Real:
+                            return True
+                        if sort_kind == BaseSortKind.Integer and isinstance(val, (int, Fraction)) and (isinstance(val, int) or val.denominator == 1):
+                            return True
+                        if sort_kind == BaseSortKind.Natural and isinstance(val, (int, Fraction)):
+                            v = int(val) if isinstance(val, int) else (int(val) if val.denominator == 1 else None)
+                            if v is not None and v >= 0:
+                                return True
+                        if sort_kind == BaseSortKind.PosInteger and isinstance(val, (int, Fraction)):
+                            v = int(val) if isinstance(val, int) else (int(val) if val.denominator == 1 else None)
+                            if v is not None and v >= 1:
+                                return True
+                        if sort_kind == BaseSortKind.NegInteger and isinstance(val, (int, Fraction)):
+                            v = int(val) if isinstance(val, int) else (int(val) if val.denominator == 1 else None)
+                            if v is not None and v < 0:
+                                return True
+                    elif cnst.cnst_kind == CnstKind.String and sort_kind == BaseSortKind.String:
+                        return True
+            # UserSortSymb: data constructor type membership
+            if t.symbol.kind == SymbolKind.UserSortSymb:
+                data_sym = getattr(t.symbol, "data_symbol", None)
+                if data_sym is not None and ground_term.symbol is data_sym:
+                    return True
+            # Direct symbol match for constructors with ground args
+            if (t.symbol.is_data_constructor and ground_term.symbol is t.symbol
+                    and t.symbol.arity > 0):
+                all_match = True
+                for i in range(t.symbol.arity):
+                    if not self._is_ground_member(t.args[i], ground_term.args[i]):
+                        all_match = False
+                        break
+                if all_match:
+                    return True
+
+        return False
 
     # -- cloning -----------------------------------------------------------
     def mk_clone(
@@ -847,6 +929,18 @@ class AppFreeCanUnn:
                 obj._contains_constants = True
         return obj
 
+    @classmethod
+    def from_type_ast(cls, table: Any, type_expr: Any) -> AppFreeCanUnn:
+        """Create from a type expression AST node.
+
+        Matches C# ``new AppFreeCanUnn(table, Factory.Instance.ToAST(fld.Type))``.
+        The type expression is stored for later resolution via ``resolve_types()``.
+        """
+        obj = cls()
+        obj._table = table
+        obj._type_expr = type_expr
+        return obj
+
     @property
     def type_expr(self) -> Any:
         return self._type_expr
@@ -919,6 +1013,108 @@ class AppFreeCanUnn:
         return result
 
     def resolve_types(self, flags: List[Any], cancel: Any = None) -> bool:
+        """Walk the type expression AST and resolve Id nodes against the symbol table.
+
+        Matches C# AppFreeCanUnn.ResolveTypes: finds all Id and Enum nodes,
+        resolves them, and adds them to the elements set.
+        """
+        if self._type_expr is None or self._table is None:
+            return True
+
+        result = True
+        self._resolve_ast(self._type_expr, flags)
+        return result
+
+    def _resolve_ast(self, node: Any, flags: List[Any]) -> bool:
+        """Recursively walk the type AST and resolve references."""
+        from formula.api.nodes import NodeKind as AstNodeKind
+        nk = getattr(node, 'node_kind', None)
+
+        if nk == AstNodeKind.Id:
+            name = node.name
+            return self._add_type_name(name, node, flags)
+        elif nk == AstNodeKind.Enum:
+            return self._add_enum(node, flags)
+        elif nk == AstNodeKind.FuncTerm:
+            # Union expression: recurse into arguments
+            fn = getattr(node, 'function', None)
+            args = getattr(node, 'args', [])
+            for arg in args:
+                self._resolve_ast(arg, flags)
+            return True
+        elif nk == AstNodeKind.Range:
+            # Range type: add to intervals
+            lo = getattr(node, 'lower', None)
+            hi = getattr(node, 'upper', None)
+            if lo is not None and hi is not None:
+                from fractions import Fraction
+                lo_val = int(lo) if isinstance(lo, (int, Fraction)) else 0
+                hi_val = int(hi) if isinstance(hi, (int, Fraction)) else 0
+                self._intervals.append((lo_val, hi_val))
+            return True
+        else:
+            # Try to walk children
+            for child in getattr(node, 'children', []):
+                self._resolve_ast(child, flags)
+            return True
+
+    def _add_type_name(self, name: str, node: Any, flags: List[Any]) -> bool:
+        """Resolve a type name and add the symbol to elements.
+
+        Matches C# AppFreeCanUnn.AddTypeName -> Resolve.
+        """
+        table = self._table
+        if table is None:
+            return False
+
+        # Try resolve via SymbolTable (returns tuple: (symbol, ambiguous_symbol))
+        if hasattr(table, 'resolve'):
+            result = table.resolve(name)
+            if isinstance(result, tuple):
+                symbol, other = result
+            else:
+                symbol, other = result, None
+            if symbol is not None:
+                self._elements.add(symbol)
+                return other is None  # False if ambiguous
+        # Try base sort names (Real, Integer, Natural, etc.)
+        sort_names = {
+            'Real': BaseSortKind.Real,
+            'Integer': BaseSortKind.Integer,
+            'Natural': BaseSortKind.Natural,
+            'PosInteger': BaseSortKind.PosInteger,
+            'NegInteger': BaseSortKind.NegInteger,
+            'String': BaseSortKind.String,
+        }
+        if name in sort_names and hasattr(table, 'get_sort_symbol'):
+            sym = table.get_sort_symbol(sort_names[name])
+            if sym is not None:
+                self._elements.add(sym)
+                return True
+        return True  # Skip silently for unresolved names
+
+    def _add_enum(self, node: Any, flags: List[Any]) -> bool:
+        """Process an Enum node."""
+        elements = getattr(node, 'elements', [])
+        for elem in elements:
+            nk = getattr(elem, 'node_kind', None)
+            from formula.api.nodes import NodeKind as AstNodeKind
+            if nk == AstNodeKind.Id:
+                self._add_type_name(elem.name, elem, flags)
+            elif nk == AstNodeKind.Cnst:
+                # Numeric or string constant
+                val = getattr(elem, 'value', None)
+                if val is not None:
+                    from fractions import Fraction
+                    if isinstance(val, (int, float, Fraction)):
+                        self._intervals.append((int(val), int(val)))
+                    elif isinstance(val, str):
+                        # String enum value - create a BaseCnstSymb
+                        if hasattr(self._table, 'get_cnst_symbol'):
+                            sym = self._table.get_cnst_symbol(val)
+                            if sym is not None:
+                                self._elements.add(sym)
+                                self._contains_constants = True
         return True
 
     def canonize(self, full_name: str, flags: List[Any], cancel: Any = None, owner: Any = None) -> bool:

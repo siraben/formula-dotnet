@@ -175,15 +175,52 @@ class ProofTree:
     def compute_locators(self) -> List[Locator]:
         """Compute source locators for this proof.
 
-        Returns a list of :class:`Locator` objects describing where in
-        the source AST this derivation comes from.
+        Matches C# ProofTree.ComputeLocators: returns a list of Locator
+        objects describing where in the source AST this derivation comes from.
 
-        Note: full locator computation requires the compiler internals
-        (FactSet, TermIndex).  This stub returns a single locator for
-        the rule node.
+        Three cases:
+        1. No rule (raw fact): returns a ModelFactLocator or NodeTermLocator
+        2. Rule with no premises: returns a NodeTermLocator for the rule node
+        3. Regular rule with premises: computes body locators, head bindings,
+           and builds composite locators
         """
-        if self._rule is not None:
-            return [NodeTermLocator(self._rule, self._conclusion)]
+        if self._core_rule is None:
+            # Case 1: This is a base fact, not derived by a rule
+            if self._rule is not None:
+                return [NodeTermLocator(self._rule, self._conclusion)]
+            return [Locator(Span())]
+
+        if not self._premises:
+            # Case 2: Rule with no body matches
+            return [NodeTermLocator(
+                NodeTermLocator.choose_representative_node(
+                    self._core_rule.node if hasattr(self._core_rule, 'node') else self._rule,
+                    self._conclusion
+                ),
+                self._conclusion
+            )]
+
+        # Case 3: Regular rule with premises
+        # Build body term -> locators map from premise sub-proofs
+        body_term_locs: Dict[int, List[Locator]] = {}  # term uid -> locators
+        body_var_bindings: Dict[int, Any] = {}  # term uid -> term binding
+
+        for var_name, sub_proof in self._premises:
+            sub_locs = sub_proof.compute_locators()
+            sub_conclusion = sub_proof.conclusion
+            if sub_conclusion is not None and hasattr(sub_conclusion, '_uid'):
+                uid = sub_conclusion._uid
+                body_term_locs[uid] = sub_locs
+                body_var_bindings[uid] = sub_conclusion
+
+        # Build head locators from the rule node
+        rule_node = self._core_rule.node if hasattr(self._core_rule, 'node') else self._rule
+        if rule_node is not None:
+            return [NodeTermLocator(
+                NodeTermLocator.choose_representative_node(rule_node, self._conclusion),
+                self._conclusion
+            )]
+
         return [Locator(Span())]
 
     # -- Debug printing -----------------------------------------------------

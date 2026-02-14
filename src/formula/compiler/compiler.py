@@ -583,12 +583,9 @@ class Compiler:
                     result = False
 
             elif nk == NodeKind.TSystem:
-                # CoreTSystem compilation (placeholder)
-                tsys = _CoreTSystemStub(mod_data)
-                if tsys.compile(flags, self._cancel):
-                    mod_data.passed_phase(PhaseKind.Compiled, tsys)
-                else:
-                    result = False
+                from formula.common.composites import CoreTSystem
+                tsys = CoreTSystem(mod_data)
+                mod_data.passed_phase(PhaseKind.Compiled, tsys)
 
             else:
                 # Domain / Transform => build RuleTable
@@ -786,6 +783,12 @@ class Compiler:
                 elif nk == NodeKind.UnnDecl:
                     name = td.name
                     symbol_table.make_unn_symbol(root_ns, name)
+
+            # Step 2: Resolve types (matches C# SymbolTable.Compile Step 2)
+            for s in symbol_table.all_symbols():
+                if s.canonical_form is not None:
+                    continue
+                s.resolve_types(symbol_table, flags)
 
             return symbol_table
         except Exception as exc:
@@ -1056,7 +1059,7 @@ def _walk_for_node_kind(node: Any, kind: NodeKind, results: list) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stubs for layers not yet ported
+# Error-path fallback stubs
 # ---------------------------------------------------------------------------
 
 class _SymbolTableStub:
@@ -1083,11 +1086,3 @@ class _RuleTableStub:
         pass
 
 
-class _CoreTSystemStub:
-    """Placeholder CoreTSystem."""
-
-    def __init__(self, mod_data: ModuleData) -> None:
-        self.mod_data = mod_data
-
-    def compile(self, flags: List[Flag], cancel=None) -> bool:
-        return True
