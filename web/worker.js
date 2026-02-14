@@ -1,13 +1,15 @@
 /**
- * Web Worker (classic): initializes Pyodide + Z3, handles parse/solve messages.
+ * Web Worker (classic) — initializes Pyodide + Z3, handles parse/solve messages.
  *
  * Loading strategy:
- *  - Pyodide: importScripts (classic worker, sets global loadPyodide)
- *  - z3-built.js: importScripts (sets global initZ3, Emscripten WASM loader)
- *  - z3-solver high-level API: dynamic import() via esm.sh
- *    (esm.sh converts CJS→ESM and bundles transitive deps like async-mutex)
- *  - browser.js init() reads global.initZ3, which we set via importScripts
+ *  - Pyodide: importScripts (sets global loadPyodide)
+ *  - z3-built.js: importScripts (sets global initZ3 — Emscripten WASM loader)
+ *  - z3-solver API: dynamic import() via esm.sh (CJS→ESM + transitive deps)
+ *  - browser.js init() reads global.initZ3, set by importScripts above
  */
+
+const Z3_CDN = "https://cdn.jsdelivr.net/npm/z3-solver@4.13.4/build/";
+const PYODIDE_CDN = "https://cdn.jsdelivr.net/pyodide/v0.27.5/full/";
 
 let pyodide = null;
 
@@ -15,134 +17,129 @@ function post(type, data) {
   self.postMessage({ type, ...data });
 }
 
-async function init() {
-  try {
-    // Step 1: Load Pyodide
-    post("progress", { phase: "Loading Python runtime (Pyodide)..." });
-    importScripts("https://cdn.jsdelivr.net/pyodide/v0.27.5/full/pyodide.js");
-    pyodide = await loadPyodide({
-      indexURL: "https://cdn.jsdelivr.net/pyodide/v0.27.5/full/",
-    });
-    post("progress", { phase: "Python runtime loaded." });
+function progress(phase) {
+  post("progress", { phase });
+}
 
-    // Step 2: Load z3-solver WASM
-    // z3-built.js defines global `var initZ3` (Emscripten WASM module loader)
-    // Set __filename so Emscripten can locate z3-built.wasm relative to the CDN,
-    // not relative to the worker page URL (which would 404).
-    post("progress", { phase: "Loading Z3 solver (this may take a moment)..." });
-    const Z3_CDN = "https://cdn.jsdelivr.net/npm/z3-solver@4.13.4/build/";
-    self.__filename = Z3_CDN + "z3-built.js";
+// Emscripten spawns pthread sub-workers via new Worker(z3-built.js), but
+// browsers block cross-origin worker scripts. Proxy through blob URLs
+// using importScripts, which IS allowed cross-origin.
+function patchWorkerForCrossOrigin() {
+  const OriginalWorker = self.Worker;
+  self.Worker = function (url, opts) {
+    if (typeof url === "string" && !url.startsWith("blob:")) {
+      try {
+        const parsed = new URL(url, self.location.href);
+        if (parsed.origin !== self.location.origin) {
+          const blob = new Blob(
+            [`importScripts(${JSON.stringify(parsed.href)});`],
+            { type: "application/javascript" },
+          );
+          return new OriginalWorker(URL.createObjectURL(blob), opts);
+        }
+      } catch (_) { /* fall through */ }
+    }
+    return new OriginalWorker(url, opts);
+  };
+}
 
-    // Monkey-patch Worker so Emscripten's pthread sub-workers can load
-    // cross-origin z3-built.js. Browsers block cross-origin worker scripts,
-    // but importScripts (inside a worker) IS allowed cross-origin.
-    const OriginalWorker = self.Worker;
-    self.Worker = function (url, opts) {
-      if (typeof url === "string" && !url.startsWith("blob:")) {
-        try {
-          const parsed = new URL(url, self.location.href);
-          if (parsed.origin !== self.location.origin) {
-            const blob = new Blob(
-              [`importScripts(${JSON.stringify(parsed.href)});`],
-              { type: "application/javascript" }
-            );
-            return new OriginalWorker(URL.createObjectURL(blob), opts);
-          }
-        } catch (e) { /* fall through */ }
-      }
-      return new OriginalWorker(url, opts);
-    };
+async function loadZ3() {
+  // __filename tells Emscripten where to find z3-built.wasm
+  self.__filename = Z3_CDN + "z3-built.js";
+  patchWorkerForCrossOrigin();
+  importScripts(Z3_CDN + "z3-built.js");
 
-    importScripts(Z3_CDN + "z3-built.js");
+  // browser.js reads initZ3 from `global`
+  self.global = self;
 
-    // Make initZ3 accessible as global.initZ3 (browser.js reads from `global`)
-    self.global = self;
+  const z3Module = await import("https://esm.sh/z3-solver@4.13.4/build/browser");
+  const z3 = await z3Module.init();
+  self._z3ctx = new z3.Context("main");
+}
 
-    // Load z3-solver high-level API via esm.sh (handles CJS→ESM + deps)
-    const z3Module = await import(
-      "https://esm.sh/z3-solver@4.13.4/build/browser"
-    );
-    const z3 = await z3Module.init();
-    const z3ctx = new z3.Context("main");
-    self._z3ctx = z3ctx;
-    post("progress", { phase: "Z3 solver loaded." });
+async function loadPyodideAndFormula() {
+  const baseUrl = self.location.href.replace(/\/[^/]*$/, "/");
 
-    // Step 3: Install antlr4
-    post("progress", { phase: "Installing ANTLR4 parser..." });
-    await pyodide.loadPackage("micropip");
-    const micropip = pyodide.pyimport("micropip");
-    await micropip.install("antlr4-python3-runtime==4.13.2");
-    post("progress", { phase: "ANTLR4 installed." });
+  // Install ANTLR4 parser runtime
+  await pyodide.loadPackage("micropip");
+  const micropip = pyodide.pyimport("micropip");
+  await micropip.install("antlr4-python3-runtime==4.13.2");
 
-    // Step 4: Unpack FORMULA source
-    post("progress", { phase: "Loading FORMULA source..." });
-    const baseUrl = self.location.href.replace(/\/[^/]*$/, "/");
-    const resp = await fetch(baseUrl + "formula-src.tar.gz");
-    if (!resp.ok) throw new Error(`Failed to fetch formula-src.tar.gz: ${resp.status}`);
-    const buf = await resp.arrayBuffer();
-    pyodide.unpackArchive(buf, "gztar", { extractDir: "/home/pyodide" });
-
-    pyodide.runPython(`
+  // Unpack FORMULA source into virtual filesystem
+  const resp = await fetch(baseUrl + "formula-src.tar.gz");
+  if (!resp.ok) throw new Error(`Failed to fetch formula-src.tar.gz: ${resp.status}`);
+  pyodide.unpackArchive(await resp.arrayBuffer(), "gztar", { extractDir: "/home/pyodide" });
+  pyodide.runPython(`
 import sys
 if "/home/pyodide" not in sys.path:
     sys.path.insert(0, "/home/pyodide")
 `);
-    post("progress", { phase: "FORMULA source loaded." });
 
-    // Step 5: Write z3 shim
-    post("progress", { phase: "Setting up Z3 bridge..." });
-    const z3ShimResp = await fetch(baseUrl + "z3_shim.py");
-    const z3ShimText = await z3ShimResp.text();
-    pyodide.FS.writeFile("/home/pyodide/z3.py", z3ShimText);
-    post("progress", { phase: "Z3 bridge ready." });
+  // Install z3 shim and formula bridge into VFS
+  for (const [file, dest] of [["z3_shim.py", "z3.py"], ["formula_bridge.py", "formula_bridge.py"]]) {
+    const text = await (await fetch(baseUrl + file)).text();
+    pyodide.FS.writeFile("/home/pyodide/" + dest, text);
+  }
 
-    // Step 6: Write formula_bridge
-    post("progress", { phase: "Setting up FORMULA bridge..." });
-    const bridgeResp = await fetch(baseUrl + "formula_bridge.py");
-    const bridgeText = await bridgeResp.text();
-    pyodide.FS.writeFile("/home/pyodide/formula_bridge.py", bridgeText);
+  await pyodide.runPythonAsync("import formula_bridge");
+}
 
-    // Pre-import the bridge
-    await pyodide.runPythonAsync("import formula_bridge");
-    post("progress", { phase: "FORMULA bridge ready." });
+async function init() {
+  try {
+    progress("Loading Python runtime...");
+    importScripts(PYODIDE_CDN + "pyodide.js");
+    pyodide = await loadPyodide({ indexURL: PYODIDE_CDN });
+    progress("Python runtime loaded.");
 
-    // Step 7: Ready!
+    progress("Loading Z3 solver (this may take a moment)...");
+    await loadZ3();
+    progress("Z3 solver loaded.");
+
+    progress("Installing FORMULA dependencies...");
+    await loadPyodideAndFormula();
+    progress("FORMULA ready.");
+
     post("ready", {});
   } catch (err) {
     post("error", { message: `Initialization failed: ${err.message}\n${err.stack || ""}` });
   }
 }
 
-// Message handler
-self.onmessage = async function (e) {
-  const msg = e.data;
+// ── Message handler ──────────────────────────────────────────────
 
-  if (msg.type === "parse") {
-    try {
-      const result = await pyodide.runPythonAsync(`
-from formula_bridge import parse
-parse(${JSON.stringify(msg.code)})
-`);
-      post("parseResult", { result: JSON.parse(result) });
-    } catch (err) {
-      post("parseResult", {
-        result: { ok: false, modules: {}, errors: [{ severity: "Error", message: err.message, line: 0, col: 0 }] },
-      });
+async function handleParse(code) {
+  const result = await pyodide.runPythonAsync(
+    `from formula_bridge import parse; parse(${JSON.stringify(code)})`,
+  );
+  return JSON.parse(result);
+}
+
+async function handleSolve({ code, model, domain, maxSols }) {
+  const result = await pyodide.runPythonAsync(
+    `from formula_bridge import solve; solve(${JSON.stringify(code)}, ${JSON.stringify(model)}, ${JSON.stringify(domain)}, ${maxSols || 1})`,
+  );
+  return JSON.parse(result);
+}
+
+const EMPTY_PARSE = { ok: false, modules: {}, errors: [] };
+const EMPTY_SOLVE = { ok: false, result: "error", errors: [], output: "" };
+
+self.onmessage = async (e) => {
+  const msg = e.data;
+  try {
+    if (msg.type === "parse") {
+      post("parseResult", { result: await handleParse(msg.code) });
+    } else if (msg.type === "solve") {
+      post("solveResult", { result: await handleSolve(msg) });
     }
-  } else if (msg.type === "solve") {
-    try {
-      const result = await pyodide.runPythonAsync(`
-from formula_bridge import solve
-solve(${JSON.stringify(msg.code)}, ${JSON.stringify(msg.model)}, ${JSON.stringify(msg.domain)}, ${msg.maxSols || 1})
-`);
-      post("solveResult", { result: JSON.parse(result) });
-    } catch (err) {
-      post("solveResult", {
-        result: { ok: false, result: "error", errors: [{ severity: "Error", message: err.message, line: 0, col: 0 }], output: "" },
-      });
+  } catch (err) {
+    const error = { severity: "Error", message: err.message, line: 0, col: 0 };
+    if (msg.type === "parse") {
+      post("parseResult", { result: { ...EMPTY_PARSE, errors: [error] } });
+    } else {
+      post("solveResult", { result: { ...EMPTY_SOLVE, errors: [error] } });
     }
   }
 };
 
-// Start initialization
 init();

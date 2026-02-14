@@ -2,7 +2,7 @@
  * FORMULA 2.0 Web Playground — main thread UI logic.
  */
 
-// ── Example programs ─────────────────────────────────────────────
+// ── Examples ─────────────────────────────────────────────────────
 
 const EXAMPLES = {
   "Mapping Example": `domain Mapping
@@ -79,170 +79,174 @@ partial model pm of Hello
 }`,
 };
 
-// ── DOM elements ─────────────────────────────────────────────────
+// ── DOM ──────────────────────────────────────────────────────────
 
-const editor = document.getElementById("editor");
-const output = document.getElementById("output");
-const runBtn = document.getElementById("run-btn");
-const exampleSelect = document.getElementById("example-select");
-const modelSelect = document.getElementById("model-select");
-const domainSelect = document.getElementById("domain-select");
-const statusEl = document.getElementById("status");
+const $ = (id) => document.getElementById(id);
+const editor = $("editor");
+const output = $("output");
+const outputWrap = $("output-wrap");
+const runBtn = $("run-btn");
+const exampleSelect = $("example-select");
+const modelSelect = $("model-select");
+const domainSelect = $("domain-select");
+const statusEl = $("status");
 
 // ── State ────────────────────────────────────────────────────────
 
 let worker = null;
 let isReady = false;
 let isBusy = false;
+let parseTimer = null;
 let currentModules = {};
 
-// ── Worker setup ─────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────
 
-function initWorker() {
-  worker = new Worker("worker.js");
-  worker.onmessage = handleWorkerMessage;
-  worker.onerror = (e) => {
-    setStatus("error", `Worker error: ${e.message}`);
-  };
+function setStatus(cls, text) {
+  statusEl.className = cls;
+  statusEl.innerHTML = cls === "loading"
+    ? `<span class="spinner"></span>${text}`
+    : text;
 }
 
-function handleWorkerMessage(e) {
-  const msg = e.data;
+function clearOutput() {
+  output.innerHTML = "";
+}
 
-  switch (msg.type) {
+function appendOutput(text, severity = "info") {
+  const span = document.createElement("span");
+  span.className = `out-${severity}`;
+  span.textContent = text;
+  output.appendChild(span);
+  outputWrap.scrollTop = outputWrap.scrollHeight;
+}
+
+function addOption(select, value, label) {
+  const opt = document.createElement("option");
+  opt.value = value;
+  opt.textContent = label;
+  select.appendChild(opt);
+}
+
+function sendParse() {
+  if (isReady && worker) {
+    worker.postMessage({ type: "parse", code: editor.value });
+  }
+}
+
+function debouncedParse() {
+  if (!isReady || !worker) return;
+  clearTimeout(parseTimer);
+  parseTimer = setTimeout(sendParse, 500);
+}
+
+// ── Module selectors ─────────────────────────────────────────────
+
+function updateModuleSelectors() {
+  const models = [];
+  const domains = [];
+  for (const [name, info] of Object.entries(currentModules)) {
+    (info.kind === "model" ? models : domains).push({ name, ...info });
+  }
+
+  models.sort((a, b) => (b.is_partial ? 1 : 0) - (a.is_partial ? 1 : 0));
+
+  modelSelect.innerHTML = "";
+  for (const m of models) {
+    addOption(modelSelect, m.name, m.name + (m.is_partial ? " (partial)" : ""));
+  }
+
+  domainSelect.innerHTML = "";
+  for (const d of domains) {
+    addOption(domainSelect, d.name, d.name);
+  }
+
+  if (models.length > 0 && models[0].domain) {
+    domainSelect.value = models[0].domain;
+  }
+}
+
+// ── Worker message handling ──────────────────────────────────────
+
+function handleWorkerMessage(e) {
+  const { type, ...data } = e.data;
+
+  switch (type) {
     case "progress":
-      setStatus("loading", msg.phase);
+      setStatus("loading", data.phase);
       break;
 
     case "ready":
       isReady = true;
       setStatus("ready", "Ready");
       runBtn.disabled = false;
-      // Auto-parse current content
-      requestParse();
+      sendParse();
       break;
 
     case "error":
-      setStatus("error", msg.message);
+      setStatus("error", data.message);
       break;
 
     case "output":
-      appendOutput(msg.text, msg.severity || "info");
+      appendOutput(data.text, data.severity || "info");
       break;
 
     case "parseResult":
-      handleParseResult(msg.result);
+      currentModules = data.result.modules || {};
+      updateModuleSelectors();
+      if (data.result.errors?.length) {
+        for (const err of data.result.errors) {
+          const loc = err.line ? ` (line ${err.line})` : "";
+          appendOutput(`${err.severity}: ${err.message}${loc}\n`, "error");
+        }
+      }
       break;
 
     case "solveResult":
-      handleSolveResult(msg.result);
+      renderSolveResult(data.result);
       isBusy = false;
       runBtn.disabled = false;
       runBtn.textContent = "Run";
+      setStatus("ready", "Ready");
       break;
   }
 }
 
-// ── Status ───────────────────────────────────────────────────────
+function renderSolveResult(result) {
+  const handlers = {
+    sat() {
+      appendOutput("\n--- RESULT: SAT ---\n", "success");
+      if (result.solution && Object.keys(result.solution).length > 0) {
+        appendOutput("Solution:\n", "success");
+        for (const [k, v] of Object.entries(result.solution)) {
+          appendOutput(`  ${k} = ${v}\n`, "success");
+        }
+      }
+    },
+    unsat() {
+      appendOutput("\n--- RESULT: UNSAT ---\n", "warning");
+      appendOutput("No solution satisfies all constraints.\n", "warning");
+    },
+  };
 
-function setStatus(cls, text) {
-  statusEl.className = cls;
-  if (cls === "loading") {
-    statusEl.innerHTML = `<span class="spinner"></span>${text}`;
+  const handler = handlers[result.result];
+  if (handler) {
+    handler();
   } else {
-    statusEl.textContent = text;
-  }
-}
-
-// ── Output ───────────────────────────────────────────────────────
-
-function clearOutput() {
-  output.innerHTML = "";
-}
-
-function appendOutput(text, severity) {
-  const span = document.createElement("span");
-  span.className = `out-${severity}`;
-  span.textContent = text;
-  output.appendChild(span);
-
-  // Auto-scroll
-  const wrap = document.getElementById("output-wrap");
-  wrap.scrollTop = wrap.scrollHeight;
-}
-
-// ── Parsing ──────────────────────────────────────────────────────
-
-let parseTimer = null;
-
-function requestParse() {
-  if (!isReady || !worker) return;
-  if (parseTimer) clearTimeout(parseTimer);
-  parseTimer = setTimeout(() => {
-    worker.postMessage({ type: "parse", code: editor.value });
-  }, 500);
-}
-
-function handleParseResult(result) {
-  currentModules = result.modules || {};
-  updateModuleSelectors();
-
-  // Show parse errors in output if any
-  if (result.errors && result.errors.length > 0) {
-    for (const err of result.errors) {
-      const loc = err.line ? ` (line ${err.line})` : "";
-      appendOutput(`${err.severity}: ${err.message}${loc}\n`, "error");
+    const label = result.result === "parse_error" ? "PARSE ERROR" : "ERROR";
+    appendOutput(`\n--- ${label} ---\n`, "error");
+    for (const err of result.errors || []) {
+      appendOutput(`${err.message}\n`, "error");
     }
   }
 }
 
-function updateModuleSelectors() {
-  // Populate model and domain selects
-  const models = [];
-  const domains = [];
-
-  for (const [name, info] of Object.entries(currentModules)) {
-    if (info.kind === "model") {
-      models.push({ name, ...info });
-    } else if (info.kind === "domain") {
-      domains.push({ name, ...info });
-    }
-  }
-
-  // Model selector: prefer partial models
-  modelSelect.innerHTML = "";
-  // Sort partial models first
-  models.sort((a, b) => (b.is_partial ? 1 : 0) - (a.is_partial ? 1 : 0));
-  for (const m of models) {
-    const opt = document.createElement("option");
-    opt.value = m.name;
-    opt.textContent = m.name + (m.is_partial ? " (partial)" : "");
-    modelSelect.appendChild(opt);
-  }
-
-  // Domain selector
-  domainSelect.innerHTML = "";
-  for (const d of domains) {
-    const opt = document.createElement("option");
-    opt.value = d.name;
-    opt.textContent = d.name;
-    domainSelect.appendChild(opt);
-  }
-
-  // Auto-select domain matching model's domain ref
-  if (models.length > 0 && models[0].domain) {
-    domainSelect.value = models[0].domain;
-  }
-}
-
-// ── Solving ──────────────────────────────────────────────────────
+// ── Actions ──────────────────────────────────────────────────────
 
 function runSolve() {
   if (!isReady || isBusy || !worker) return;
 
   const model = modelSelect.value;
   const domain = domainSelect.value;
-
   if (!model || !domain) {
     clearOutput();
     appendOutput("Please select a model and domain.\n", "warning");
@@ -255,99 +259,48 @@ function runSolve() {
   clearOutput();
   appendOutput(`Solving ${model} against ${domain}.conforms...\n\n`, "info");
 
-  worker.postMessage({
-    type: "solve",
-    code: editor.value,
-    model: model,
-    domain: domain,
-    maxSols: 1,
-  });
+  worker.postMessage({ type: "solve", code: editor.value, model, domain, maxSols: 1 });
 }
 
-function handleSolveResult(result) {
-  if (result.result === "sat") {
-    appendOutput("\n--- RESULT: SAT ---\n", "success");
-    if (result.solution && Object.keys(result.solution).length > 0) {
-      appendOutput("Solution:\n", "success");
-      for (const [k, v] of Object.entries(result.solution)) {
-        appendOutput(`  ${k} = ${v}\n`, "success");
-      }
-    }
-  } else if (result.result === "unsat") {
-    appendOutput("\n--- RESULT: UNSAT ---\n", "warning");
-    appendOutput("No solution satisfies all constraints.\n", "warning");
-  } else if (result.result === "parse_error") {
-    appendOutput("\n--- PARSE ERROR ---\n", "error");
-    if (result.errors) {
-      for (const err of result.errors) {
-        appendOutput(`${err.message}\n`, "error");
-      }
-    }
-  } else {
-    appendOutput("\n--- ERROR ---\n", "error");
-    if (result.errors) {
-      for (const err of result.errors) {
-        appendOutput(`${err.message}\n`, "error");
-      }
-    }
-  }
-
-  setStatus("ready", "Ready");
+function loadExample(name) {
+  if (!EXAMPLES[name]) return;
+  editor.value = EXAMPLES[name];
+  clearOutput();
+  clearTimeout(parseTimer);
+  sendParse();
 }
 
 // ── Event listeners ──────────────────────────────────────────────
 
-// Examples dropdown
-exampleSelect.addEventListener("change", () => {
-  const name = exampleSelect.value;
-  if (name && EXAMPLES[name]) {
-    editor.value = EXAMPLES[name];
-    clearOutput();
-    // Immediate parse (bypass debounce) so selectors update before user clicks Run
-    if (parseTimer) clearTimeout(parseTimer);
-    if (isReady && worker) {
-      worker.postMessage({ type: "parse", code: editor.value });
-    }
-  }
+exampleSelect.addEventListener("change", () => loadExample(exampleSelect.value));
+runBtn.addEventListener("click", runSolve);
+$("clear-btn").addEventListener("click", clearOutput);
+editor.addEventListener("input", debouncedParse);
+
+modelSelect.addEventListener("change", () => {
+  const info = currentModules[modelSelect.value];
+  if (info?.domain) domainSelect.value = info.domain;
 });
 
-// Run button
-runBtn.addEventListener("click", runSolve);
-
-// Keyboard shortcut: Ctrl/Cmd+Enter to run
 editor.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
     e.preventDefault();
     runSolve();
   }
-  // Tab support
   if (e.key === "Tab") {
     e.preventDefault();
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-    editor.value = editor.value.substring(0, start) + "  " + editor.value.substring(end);
-    editor.selectionStart = editor.selectionEnd = start + 2;
+    const { selectionStart: s, selectionEnd: end } = editor;
+    editor.value = editor.value.substring(0, s) + "  " + editor.value.substring(end);
+    editor.selectionStart = editor.selectionEnd = s + 2;
   }
 });
 
-// Auto-parse on typing
-editor.addEventListener("input", () => {
-  requestParse();
-});
+// ── Init ─────────────────────────────────────────────────────────
 
-// Model selector change: auto-select matching domain
-modelSelect.addEventListener("change", () => {
-  const modelName = modelSelect.value;
-  const info = currentModules[modelName];
-  if (info && info.domain) {
-    domainSelect.value = info.domain;
-  }
-});
-
-// ── Initialize ───────────────────────────────────────────────────
-
-// Load default example
 editor.value = EXAMPLES["Mapping Example"];
 setStatus("loading", "Initializing...");
 runBtn.disabled = true;
-initWorker();
+
+worker = new Worker("worker.js");
+worker.onmessage = handleWorkerMessage;
+worker.onerror = (e) => setStatus("error", `Worker error: ${e.message}`);
