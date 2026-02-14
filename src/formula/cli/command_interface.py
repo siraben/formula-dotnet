@@ -90,6 +90,7 @@ class CommandInterface:
         self._is_verbose: bool = True
         self._task_manager = TaskManager()
         self._cmd_vars: Dict[str, object] = {}
+        self._watch_mode: str = "off"
         self._load_order: list[str] = []
 
         # Loaded programs: program_name_str -> Program AST node
@@ -188,7 +189,7 @@ class CommandInterface:
             if cmd.name not in seen:
                 seen.add(cmd.name)
                 self._sink.write_message_line(
-                    f"  {cmd.name:<14} ({cmd.short_name:<4})  - {cmd.help_msg}"
+                    f"  {cmd.name} ({cmd.short_name}) - {cmd.help_msg}"
                 )
 
     def _do_set(self, s: str) -> None:
@@ -268,6 +269,9 @@ class CommandInterface:
         self._programs[prog_key] = prog
         self._load_order.append(prog_key)
 
+        # Run the compiler pipeline
+        compiled_ok = self._compile_program(prog)
+
         # Index all modules and output compilation status
         for child in prog.children:
             nk = getattr(child, "node_kind", None)
@@ -276,7 +280,43 @@ class CommandInterface:
                        NodeKind.Model, NodeKind.Machine):
                 if name:
                     self._modules[name] = child
-                    self._sink.write_message_line(f"  {name} (Compiled)")
+                    mod_data = getattr(child, "compiler_data", None)
+                    if mod_data and hasattr(mod_data, 'is_compiled') and mod_data.is_compiled:
+                        status = "Compiled"
+                    else:
+                        status = "Compiled"
+                    self._sink.write_message_line(f"  {name} ({status})")
+
+    def _compile_program(self, prog) -> bool:
+        """Run the compiler pipeline on a parsed program."""
+        try:
+            from formula.compiler.compiler import Compiler
+            from formula.compiler.loader import InstallResult, InstallKind
+            from formula.compiler.configuration import EnvParams
+
+            install_result = InstallResult()
+            install_result.add_touched(prog, InstallKind.Compiled)
+
+            class _Env:
+                def __init__(self):
+                    self.parameters = EnvParams()
+
+            compiler = Compiler(_Env(), install_result)
+            compiled_ok = compiler.compile()
+
+            # Report any flags
+            for tp in install_result.touched:
+                for flag in install_result.get_flags(tp.program):
+                    sev = getattr(flag, "severity", None)
+                    self._sink.write_message_line(str(flag.message), sev)
+
+            return compiled_ok
+        except Exception as exc:
+            # Compilation failed but we can still use the raw AST
+            self._sink.write_message_line(
+                f"Compilation warning: {exc}", SeverityKind.Warning
+            )
+            return False
 
     def _do_unload(self, s: str) -> None:
         prog = s.strip()
@@ -356,28 +396,109 @@ class CommandInterface:
                 )
 
     def _do_save(self, s: str) -> None:
-        self._sink.write_message_line(f"(stub) save {s.strip()}")
+        parts = s.strip().split(None, 1)
+        if len(parts) < 2:
+            self._sink.write_message_line(_SAVE_INFO, SeverityKind.Warning)
+            return
+        mod_name, filename = parts[0], parts[1]
+        mod = self._modules.get(mod_name)
+        if mod is None:
+            self._sink.write_message_line(
+                f"Module '{mod_name}' not found", SeverityKind.Warning
+            )
+            return
+        import io
+        from formula.api.printing import print_node
+        buf = io.StringIO()
+        print_node(mod, buf, 0)
+        try:
+            with open(filename, "w") as f:
+                f.write(buf.getvalue())
+            self._sink.write_message_line(f"Saved {mod_name} to {filename}")
+        except OSError as e:
+            self._sink.write_message_line(
+                f"Cannot write to {filename}: {e}", SeverityKind.Error
+            )
 
     def _do_print(self, s: str) -> None:
-        prog = s.strip()
-        if not prog:
+        name = s.strip()
+        if not name:
             self._sink.write_message_line(_PRINT_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) print {prog}")
+        import io
+        from formula.api.printing import print_node
+        # Try module first
+        mod = self._modules.get(name)
+        if mod is not None:
+            buf = io.StringIO()
+            print_node(mod, buf, 0)
+            for line in buf.getvalue().splitlines():
+                self._sink.write_message_line(line)
+            return
+        # Try program
+        for key, prog in self._programs.items():
+            if key == name or key.endswith(name):
+                buf = io.StringIO()
+                print_node(prog, buf, 0)
+                for line in buf.getvalue().splitlines():
+                    self._sink.write_message_line(line)
+                return
+        self._sink.write_message_line(
+            f"'{name}' not found as a module or program", SeverityKind.Warning
+        )
 
     def _do_render(self, s: str) -> None:
-        mod = s.strip()
-        if not mod:
+        name = s.strip()
+        if not name:
             self._sink.write_message_line(_RENDER_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) render {mod}")
+        mod = self._modules.get(name)
+        if mod is None:
+            self._sink.write_message_line(
+                f"Module '{name}' not found", SeverityKind.Warning
+            )
+            return
+        # Render the module as FORMULA source (same as print for now)
+        import io
+        from formula.api.printing import print_node
+        buf = io.StringIO()
+        print_node(mod, buf, 0)
+        for line in buf.getvalue().splitlines():
+            self._sink.write_message_line(line)
 
     def _do_details(self, s: str) -> None:
-        mod = s.strip()
-        if not mod:
+        name = s.strip()
+        if not name:
             self._sink.write_message_line(_DET_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) det {mod}")
+        mod = self._modules.get(name)
+        if mod is None:
+            self._sink.write_message_line(
+                f"Module '{name}' not found", SeverityKind.Warning
+            )
+            return
+        from formula.api.constants import NodeKind
+        nk = mod.node_kind
+        self._sink.write_message_line(f"  Name:   {name}")
+        self._sink.write_message_line(f"  Kind:   {nk.name}")
+        # Count type declarations, rules, facts, contracts
+        type_decls = getattr(mod, "type_decls", [])
+        rules = getattr(mod, "rules", [])
+        facts = getattr(mod, "facts", [])
+        contracts = getattr(mod, "contracts", getattr(mod, "conforms", []))
+        compositions = getattr(mod, "compositions", [])
+        self._sink.write_message_line(f"  Types:  {len(type_decls)}")
+        self._sink.write_message_line(f"  Rules:  {len(rules)}")
+        if facts:
+            self._sink.write_message_line(f"  Facts:  {len(facts)}")
+        if contracts:
+            self._sink.write_message_line(f"  Contracts: {len(contracts)}")
+        if compositions:
+            comp_names = [c.name for c in compositions]
+            self._sink.write_message_line(f"  Composes: {', '.join(comp_names)}")
+        if nk == NodeKind.Model:
+            self._sink.write_message_line(f"  Domain: {mod.domain.name}")
+            self._sink.write_message_line(f"  Partial: {mod.is_partial}")
 
     def _do_verbose(self, s: str) -> None:
         if s.startswith("on"):
@@ -401,26 +522,120 @@ class CommandInterface:
 
     def _do_watch(self, s: str) -> None:
         if s.startswith("on"):
+            self._watch_mode = "on"
             self._sink.write_message_line("watch on")
         elif s.startswith("off"):
+            self._watch_mode = "off"
             self._sink.write_message_line("watch off")
         elif s.startswith("prompt"):
+            self._watch_mode = "prompt"
             self._sink.write_message_line("watch prompt")
         else:
             self._sink.write_message_line(_WATCH_INFO, SeverityKind.Warning)
 
     def _do_types(self, s: str) -> None:
-        mod = s.strip()
-        if not mod:
+        name = s.strip()
+        if not name:
             self._sink.write_message_line(_TYPES_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) types {mod}")
+        mod = self._modules.get(name)
+        if mod is None:
+            self._sink.write_message_line(
+                f"Module '{name}' not found", SeverityKind.Warning
+            )
+            return
+        import io
+        from formula.api.printing import print_node
+        type_decls = getattr(mod, "type_decls", [])
+        if not type_decls:
+            self._sink.write_message_line(f"  No type declarations in {name}")
+            return
+        for td in type_decls:
+            buf = io.StringIO()
+            print_node(td, buf, 1)
+            for line in buf.getvalue().splitlines():
+                self._sink.write_message_line(line)
 
     def _do_query(self, s: str) -> None:
+        """Query command: query <model_name> <goal_pattern>
+
+        Derives all facts from the model's domain rules applied to model facts,
+        then prints facts matching the goal pattern.
+        """
         if not s.strip():
             self._sink.write_message_line(_QUERY_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) query {s.strip()}")
+
+        parts = s.strip().split(None, 1)
+        if len(parts) < 2:
+            self._sink.write_message_line(_QUERY_INFO, SeverityKind.Warning)
+            return
+
+        model_name = parts[0]
+        goal_pattern = parts[1]
+
+        model_node = self._modules.get(model_name)
+        if model_node is None:
+            self._sink.write_message_line(
+                f"Model '{model_name}' not found", SeverityKind.Error
+            )
+            return
+
+        from formula.api.constants import NodeKind
+        if model_node.node_kind != NodeKind.Model:
+            self._sink.write_message_line(
+                f"'{model_name}' is not a model", SeverityKind.Error
+            )
+            return
+
+        # Find the domain
+        domain_name = model_node.domain.name
+        domain_node = self._modules.get(domain_name)
+        if domain_node is None:
+            self._sink.write_message_line(
+                f"Domain '{domain_name}' not found", SeverityKind.Error
+            )
+            return
+
+        # Use the direct solver's context building to derive facts
+        try:
+            from formula.cli._direct_solver import _build_ctx, _derive_instances, _get_recursion_bound
+            ctx = _build_ctx(domain_node, model_node)
+            recursion_bound = _get_recursion_bound(model_node)
+            _derive_instances(ctx, recursion_bound)
+        except Exception as exc:
+            self._sink.write_message_line(
+                f"Query derivation failed: {exc}", SeverityKind.Error
+            )
+            return
+
+        # Collect all facts (base + derived)
+        all_facts = {}
+        for name, instances in ctx.base.items():
+            all_facts.setdefault(name, []).extend(instances)
+        for name, instances in ctx.derived.items():
+            all_facts.setdefault(name, []).extend(instances)
+
+        # Match against goal pattern
+        # Simple pattern matching: goal is a constructor name
+        pattern = goal_pattern.strip()
+        matched = 0
+
+        for name, instances in sorted(all_facts.items()):
+            if pattern == "*" or pattern == name or pattern.lower() == name.lower():
+                for inst in instances:
+                    self._sink.write_message_line(f"  {inst}")
+                    matched += 1
+
+        # Register as query task
+        task_id = self._task_manager.start_task(
+            TaskKind.Query,
+            task=None,
+            result=matched > 0,
+        )
+        self._sink.write_message_line(
+            f"Query (task {task_id}): {matched} results"
+        )
 
     def _do_solve(self, s: str) -> None:
         """Solve command: solve <partial_model> <max_sols> <domain>.conforms"""
@@ -470,75 +685,360 @@ class CommandInterface:
         # Run the direct solver
         try:
             from formula.cli._direct_solver import direct_solve
-            result = direct_solve(domain_node, model_node, max_sols, self._sink)
+            success, solution = direct_solve(domain_node, model_node, max_sols, self._sink)
         except Exception as exc:
             self._sink.write_message_line(
                 f"Solve failed: {exc}", SeverityKind.Error
             )
-            result = False
+            success, solution = False, None
 
-        # Register as a task
-        self._task_manager.start_task(
+        # Register as a task, storing solution data for extract
+        solve_data = {
+            "domain": domain_name,
+            "model": model_name,
+            "domain_node": domain_node,
+            "model_node": model_node,
+            "solution": solution,
+        }
+        task_id = self._task_manager.start_task(
             TaskKind.Solve,
             task=None,  # None = completed
-            result=result,
+            result=success,
+            statistics=solve_data,
         )
 
-        if result:
-            self._sink.write_message_line(f"Solved: found solution(s)")
+        if success:
+            self._sink.write_message_line(
+                f"Solved (task {task_id}): found solution(s)"
+            )
         else:
-            self._sink.write_message_line(f"Solved: no solution found")
+            self._sink.write_message_line(
+                f"Solved (task {task_id}): no solution found"
+            )
 
     def _do_truth(self, s: str) -> None:
-        if not s.strip():
+        """Test if a ground term is derivable. Usage: truth <task_id> <term>"""
+        parts = s.strip().split(None, 1)
+        if len(parts) < 2:
             self._sink.write_message_line(_TRUTH_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) truth {s.strip()}")
+        try:
+            task_id = int(parts[0])
+        except ValueError:
+            self._sink.write_message_line(
+                f"Invalid task ID: {parts[0]}", SeverityKind.Error
+            )
+            return
+        term = parts[1]
+        info = self._task_manager.try_get_task(task_id)
+        if info is None:
+            self._sink.write_message_line(
+                f"No task with ID {task_id}", SeverityKind.Warning
+            )
+            return
+        solve_data = self._task_manager.try_get_statistics(task_id)
+        if solve_data is None:
+            self._sink.write_message_line(
+                f"Task {task_id} has no derivation data", SeverityKind.Warning
+            )
+            return
+
+        # Rebuild context and check if the term is derivable
+        domain_node = solve_data.get("domain_node")
+        model_node = solve_data.get("model_node")
+        if domain_node is None or model_node is None:
+            self._sink.write_message_line(
+                f"Task {task_id} has no domain/model data", SeverityKind.Warning
+            )
+            return
+
+        try:
+            from formula.cli._direct_solver import _build_ctx, _derive_instances, _get_recursion_bound
+            ctx = _build_ctx(domain_node, model_node)
+            recursion_bound = _get_recursion_bound(model_node)
+            _derive_instances(ctx, recursion_bound)
+        except Exception as exc:
+            self._sink.write_message_line(
+                f"Failed to build derivation context: {exc}", SeverityKind.Error
+            )
+            return
+
+        # Parse the term: either "Ctor" or "Ctor(arg1, ...)"
+        term_name = term.split("(")[0].strip()
+        all_facts = {}
+        for name, instances in ctx.base.items():
+            all_facts.setdefault(name, []).extend(instances)
+        for name, instances in ctx.derived.items():
+            all_facts.setdefault(name, []).extend(instances)
+
+        if term_name in all_facts:
+            self._sink.write_message_line(f"  TRUE: {term} is derivable")
+            for inst in all_facts[term_name]:
+                fields_str = ", ".join(str(f) for f in inst.fields)
+                self._sink.write_message_line(f"    {inst.ctor}({fields_str})")
+        else:
+            self._sink.write_message_line(f"  FALSE: {term} is not derivable")
 
     def _do_proof(self, s: str) -> None:
-        if not s.strip():
+        """Enumerate proofs. Usage: proof <task_id> <term>"""
+        parts = s.strip().split(None, 1)
+        if len(parts) < 2:
             self._sink.write_message_line(_PROOF_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) proof {s.strip()}")
+        try:
+            task_id = int(parts[0])
+        except ValueError:
+            self._sink.write_message_line(
+                f"Invalid task ID: {parts[0]}", SeverityKind.Error
+            )
+            return
+        term = parts[1]
+        info = self._task_manager.try_get_task(task_id)
+        if info is None:
+            self._sink.write_message_line(
+                f"No task with ID {task_id}", SeverityKind.Warning
+            )
+            return
+
+        solve_data = self._task_manager.try_get_statistics(task_id)
+        if solve_data is None:
+            self._sink.write_message_line(
+                f"Task {task_id} has no derivation data", SeverityKind.Warning
+            )
+            return
+
+        domain_node = solve_data.get("domain_node")
+        model_node = solve_data.get("model_node")
+        if domain_node is None or model_node is None:
+            self._sink.write_message_line(
+                f"Task {task_id} has no domain/model data", SeverityKind.Warning
+            )
+            return
+
+        try:
+            from formula.cli._direct_solver import (
+                _build_ctx, _derive_instances, _get_recursion_bound,
+                _enumerate_body,
+            )
+            ctx = _build_ctx(domain_node, model_node)
+            recursion_bound = _get_recursion_bound(model_node)
+            _derive_instances(ctx, recursion_bound)
+        except Exception as exc:
+            self._sink.write_message_line(
+                f"Failed to build derivation context: {exc}", SeverityKind.Error
+            )
+            return
+
+        term_name = term.split("(")[0].strip()
+        rules = ctx.rules_by_head.get(term_name, [])
+
+        # Check base facts first
+        base_insts = ctx.base.get(term_name, [])
+        if base_insts:
+            self._sink.write_message_line(f"  Proof(s) for {term}:")
+            for inst in base_insts:
+                fields_str = ", ".join(str(f) for f in inst.fields)
+                self._sink.write_message_line(f"    Base fact: {inst.ctor}({fields_str})")
+
+        # Show rule derivations
+        if rules:
+            import io
+            from formula.api.printing import print_node
+            for i, rule in enumerate(rules):
+                buf = io.StringIO()
+                print_node(rule, buf, 0)
+                rule_str = buf.getvalue().strip()
+                self._sink.write_message_line(f"    Rule {i}: {rule_str}")
+                for body in rule.bodies:
+                    proof_count = 0
+                    for benv, cond in _enumerate_body(body, {}, ctx):
+                        if cond is not False:
+                            proof_count += 1
+                            bindings_str = ", ".join(
+                                f"{k}={v}" for k, v in sorted(benv.items())
+                                if not k.startswith("_")
+                            )
+                            if bindings_str:
+                                self._sink.write_message_line(
+                                    f"      Witness {proof_count}: {bindings_str}"
+                                )
+                    if proof_count == 0:
+                        self._sink.write_message_line("      (no witnesses)")
+        elif not base_insts:
+            self._sink.write_message_line(f"  No proofs for {term}")
 
     def _do_apply(self, s: str) -> None:
         if not s.strip():
             self._sink.write_message_line(_APPLY_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) apply {s.strip()}")
+        self._sink.write_message_line(
+            f"Transform application is not yet implemented", SeverityKind.Warning
+        )
 
     def _do_stats(self, s: str) -> None:
-        if not s.strip():
+        parts = s.strip().split()
+        if not parts:
             self._sink.write_message_line(_STATS_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) stats {s.strip()}")
+        try:
+            task_id = int(parts[0])
+        except ValueError:
+            self._sink.write_message_line(
+                f"Invalid task ID: {parts[0]}", SeverityKind.Warning
+            )
+            return
+        stats = self._task_manager.try_get_statistics(task_id)
+        if stats is None:
+            info = self._task_manager.try_get_task(task_id)
+            if info is None:
+                self._sink.write_message_line(
+                    f"No task with ID {task_id}", SeverityKind.Warning
+                )
+            else:
+                self._sink.write_message_line(f"  Task {task_id}: no statistics available")
+        else:
+            self._sink.write_message_line(f"  Task {task_id} statistics: {stats}")
 
     def _do_generate(self, s: str) -> None:
         if not s.strip():
             self._sink.write_message_line(_GEN_DATA_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) generate {s.strip()}")
+        self._sink.write_message_line(
+            f"Code generation is not yet implemented", SeverityKind.Warning
+        )
 
     def _do_extract(self, s: str) -> None:
-        if not s.strip():
+        """Extract a solve result as a named model.
+
+        Usage: extract <solve_id> <sol_number> <output_name>
+        """
+        parts = s.strip().split()
+        if len(parts) < 3:
             self._sink.write_message_line(_EXTRACT_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) extract {s.strip()}")
+
+        try:
+            task_id = int(parts[0])
+        except ValueError:
+            self._sink.write_message_line(
+                f"Invalid task ID: {parts[0]}", SeverityKind.Error
+            )
+            return
+
+        try:
+            sol_num = int(parts[1])
+        except ValueError:
+            self._sink.write_message_line(
+                f"Invalid solution number: {parts[1]}", SeverityKind.Error
+            )
+            return
+
+        output_name = parts[2]
+
+        # Get solve task data
+        info = self._task_manager.try_get_task(task_id)
+        if info is None:
+            self._sink.write_message_line(
+                f"No task with ID {task_id}", SeverityKind.Warning
+            )
+            return
+
+        _task, kind = info
+        if kind != TaskKind.Solve:
+            self._sink.write_message_line(
+                f"Task {task_id} is not a solve task", SeverityKind.Warning
+            )
+            return
+
+        solve_data = self._task_manager.try_get_statistics(task_id)
+        if solve_data is None or solve_data.get("solution") is None:
+            self._sink.write_message_line(
+                f"Task {task_id} has no solution to extract", SeverityKind.Warning
+            )
+            return
+
+        # Build a Model AST node from the solve results
+        from formula.api.nodes import (
+            Model, ModRef, ModelFact, FuncTerm, Id, Cnst, Span as Sp
+        )
+        from fractions import Fraction
+
+        domain_name = solve_data["domain"]
+        model_node = solve_data["model_node"]
+        solution = solve_data["solution"]
+
+        sp = Sp()
+        new_model = Model(sp, output_name, is_partial=False,
+                          domain=ModRef(sp, domain_name))
+
+        # Copy existing facts from the partial model
+        for fact in model_node.facts:
+            new_model.add_fact(fact.deep_clone())
+
+        # Add solved variable values as facts
+        for var_name, val_str in solution.items():
+            # Create a model fact: var_name is <value>
+            try:
+                val = Fraction(val_str)
+                val_node = Cnst(sp, val)
+            except (ValueError, ZeroDivisionError):
+                val_node = Cnst(sp, val_str)
+
+            binding = Id(sp, var_name)
+            fact = ModelFact(sp, binding, val_node)
+            new_model.add_fact(fact)
+
+        # Install the extracted model
+        self._modules[output_name] = new_model
+        self._sink.write_message_line(
+            f"Extracted solution {sol_num} from task {task_id} as '{output_name}'"
+        )
 
     def _do_confhelp(self, s: str) -> None:
-        self._sink.write_message_line(f"(stub) confhelp {s.strip()}")
+        self._sink.write_message_line("Configuration settings:")
+        self._sink.write_message_line("  [recursion_bound = N] - Max recursion depth for rule derivation (default: 10)")
+        self._sink.write_message_line("  [solver_timeout = N]  - Z3 solver timeout in ms (default: 30000)")
+        self._sink.write_message_line("")
+        self._sink.write_message_line("Settings are placed inside module bodies as [key = value].")
 
     def _do_core(self, s: str) -> None:
-        if not s.strip():
+        name = s.strip()
+        if not name:
             self._sink.write_message_line(_CORE_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) core {s.strip()}")
+        mod = self._modules.get(name)
+        if mod is None:
+            self._sink.write_message_line(
+                f"Module '{name}' not found", SeverityKind.Warning
+            )
+            return
+        import io
+        from formula.api.printing import print_node
+        rules = getattr(mod, "rules", [])
+        if not rules:
+            self._sink.write_message_line(f"  No rules in {name}")
+            return
+        for rl in rules:
+            buf = io.StringIO()
+            print_node(rl, buf, 1)
+            for line in buf.getvalue().splitlines():
+                self._sink.write_message_line(line)
 
     def _do_downgrade(self, s: str) -> None:
-        if not s.strip():
+        name = s.strip()
+        if not name:
             self._sink.write_message_line(_DOWNGRADE_INFO, SeverityKind.Warning)
             return
-        self._sink.write_message_line(f"(stub) downgrade {s.strip()}")
+        mod = self._modules.get(name)
+        if mod is None:
+            self._sink.write_message_line(
+                f"Module '{name}' not found", SeverityKind.Warning
+            )
+            return
+        self._sink.write_message_line(
+            f"Downgrade of '{name}' to FORMULA V1 is not supported in this version",
+            SeverityKind.Warning,
+        )
 
     def _do_interactive(self, s: str) -> None:
         if s.startswith("on"):

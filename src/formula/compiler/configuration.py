@@ -21,6 +21,8 @@ from typing import (
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
+from formula.api.constants import NodeKind
+
 
 # ---------------------------------------------------------------------------
 # Constants  (CnstKind mirrors API.Nodes.CnstKind)
@@ -29,33 +31,6 @@ from dataclasses import dataclass, field
 class CnstKind(Enum):
     Numeric = 0
     String = 1
-
-
-class NodeKind(Enum):
-    """Subset of API NodeKind values used by Configuration."""
-    AnyNodeKind = -1
-    Program = 0
-    Config = 1
-    Setting = 2
-    ModRef = 3
-    Domain = 4
-    Transform = 5
-    TSystem = 6
-    Model = 7
-    Param = 8
-    Step = 9
-    Update = 10
-    Rule = 11
-    ContractItem = 12
-    Quote = 13
-    Compr = 14
-    FuncTerm = 15
-    Id = 16
-    Cnst = 17
-    Body = 18
-    Find = 19
-    ModelFact = 20
-    QuoteRun = 21
 
 
 class SeverityKind(Enum):
@@ -102,11 +77,19 @@ class Cnst:
         return str(self.raw)
 
 
-@dataclass
+@dataclass(eq=False)
 class Location:
     """Wraps an AST reference used as a keyed location."""
     ast: Any = None
     program: Any = None
+
+    def __eq__(self, other):
+        if not isinstance(other, Location):
+            return NotImplemented
+        return self.ast is other.ast and self.program is other.program
+
+    def __hash__(self):
+        return id(self.ast)
 
     @staticmethod
     def compare(a: "Location", b: "Location") -> int:

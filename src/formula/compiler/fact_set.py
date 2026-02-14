@@ -244,9 +244,22 @@ class FactSet:
             return False
 
         # Compile the rule table
-        self._rules = _RuleTableStub(self._mod_data, self._index)
-        if not self._rules.compile(flags, cancel):
-            success.failed()
+        symbol_table = getattr(self._mod_data, "symbol_table", None)
+        if symbol_table is not None and not isinstance(symbol_table, type(None)):
+            try:
+                from formula.common.terms import TermIndex
+                from formula.common.rules import RuleTable
+                self._index = TermIndex(symbol_table)
+                self._rules = RuleTable(self._index)
+                self._rules.stratify()
+            except Exception:
+                self._rules = _RuleTableStub(self._mod_data, self._index)
+                if not self._rules.compile(flags, cancel):
+                    success.failed()
+        else:
+            self._rules = _RuleTableStub(self._mod_data, self._index)
+            if not self._rules.compile(flags, cancel):
+                success.failed()
 
         return success.result and not cancel()
 

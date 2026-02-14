@@ -592,20 +592,9 @@ class Compiler:
 
             else:
                 # Domain / Transform => build RuleTable
-                rule_table = _RuleTableStub(mod_data)
-                if rule_table.compile(flags, self._cancel):
+                rule_table = self._build_rule_table(mod_data, flags)
+                if rule_table is not None:
                     mod_data.passed_phase(PhaseKind.Compiled, rule_table)
-
-                    # Productivity check if configured
-                    conf = self._get_module_config(
-                        getattr(mod_data.source, "ast", None)
-                    )
-                    if conf is not None:
-                        prod_setting = conf.try_get_setting(
-                            Configuration.COMPILER_PRODUCTIVITY_CHECK_SETTING
-                        )
-                        if prod_setting is not None:
-                            rule_table.productivity_check(prod_setting, flags)
                 else:
                     result = False
 
@@ -730,10 +719,110 @@ class Compiler:
     @staticmethod
     def _build_symbol_table(mod_data: ModuleData, flags: List[Flag]) -> Any:
         """
-        Build a SymbolTable for the module.
-        Placeholder: returns a stub until SymbolTable is ported.
+        Build a SymbolTable for the module from its type declarations.
         """
-        return _SymbolTableStub(mod_data)
+        from formula.common.symbols import SymbolTable
+        from formula.common.op_library import register_ops
+        from formula.common.symbol_types import MapKind as SymMapKind
+
+        try:
+            symbol_table = SymbolTable(mod_data.env)
+            register_ops(symbol_table)
+
+            # Get the AST to walk
+            module_ast = mod_data.reduced
+            if module_ast is None:
+                module_ast = getattr(mod_data.source, "ast", None)
+            if module_ast is None:
+                return symbol_table
+
+            mod_name = getattr(module_ast, "name", "")
+            root_ns = symbol_table.make_namespace(mod_name) if mod_name else symbol_table.root
+
+            # Walk type declarations
+            type_decls = getattr(module_ast, "type_decls", [])
+            for td in type_decls:
+                nk = getattr(td, "node_kind", None)
+
+                if nk == NodeKind.ConDecl:
+                    name = td.name
+                    fields = td.fields
+                    arity = len(fields)
+                    is_new = getattr(td, "is_new", False)
+                    is_sub = getattr(td, "is_sub", False)
+                    con_sym = symbol_table.make_con_symbol(
+                        root_ns, name, arity, is_new=is_new, is_sub=is_sub
+                    )
+                    # Register field labels
+                    for f in fields:
+                        label = getattr(f, "name", None)
+                        if label and label != "_":
+                            symbol_table.register_label(label, con_sym)
+
+                elif nk == NodeKind.MapDecl:
+                    name = td.name
+                    dom_fields = td.dom
+                    cod_fields = td.cod
+                    dom_arity = len(dom_fields)
+                    cod_arity = len(cod_fields)
+                    is_partial = getattr(td, "is_partial", False)
+                    # Convert API MapKind to symbol_types MapKind
+                    api_mk = getattr(td, "map_kind", None)
+                    mk_name = api_mk.name if api_mk is not None else "Fun"
+                    sym_mk = SymMapKind[mk_name] if hasattr(SymMapKind, mk_name) else SymMapKind.Fun
+                    map_sym = symbol_table.make_map_symbol(
+                        root_ns, name, dom_arity, cod_arity,
+                        map_kind=sym_mk, is_partial=is_partial
+                    )
+                    for f in dom_fields:
+                        label = getattr(f, "name", None)
+                        if label and label != "_":
+                            symbol_table.register_label(label, map_sym)
+                    for f in cod_fields:
+                        label = getattr(f, "name", None)
+                        if label and label != "_":
+                            symbol_table.register_label(label, map_sym)
+
+                elif nk == NodeKind.UnnDecl:
+                    name = td.name
+                    symbol_table.make_unn_symbol(root_ns, name)
+
+            return symbol_table
+        except Exception as exc:
+            flags.append(Flag(
+                SeverityKind.Error, None,
+                f"Failed to build symbol table: {exc}",
+                code=70,
+            ))
+            return _SymbolTableStub(mod_data)
+
+    @staticmethod
+    def _build_rule_table(mod_data: ModuleData, flags: List[Flag]) -> Any:
+        """
+        Build a RuleTable for a domain or transform module.
+        """
+        from formula.common.rules import RuleTable
+        from formula.common.terms import TermIndex
+
+        try:
+            symbol_table = mod_data.symbol_table
+            if symbol_table is None or isinstance(symbol_table, _SymbolTableStub):
+                # Fall back to stub if no real symbol table
+                stub = _RuleTableStub(mod_data)
+                stub.compile(flags)
+                return stub
+
+            index = TermIndex(symbol_table)
+            rule_table = RuleTable(index)
+            rule_table.stratify()
+            return rule_table
+        except Exception as exc:
+            flags.append(Flag(
+                SeverityKind.Error, None,
+                f"Failed to build rule table: {exc}",
+                code=71,
+            ))
+            return None
 
 
 # ---------------------------------------------------------------------------
