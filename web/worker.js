@@ -121,6 +121,13 @@ async function handleSolve({ code, model, domain, maxSols }) {
   return JSON.parse(result);
 }
 
+async function handleInspect({ code, module, view }) {
+  const result = await pyodide.runPythonAsync(
+    `from formula_bridge import inspect; inspect(${JSON.stringify(code)}, ${JSON.stringify(module || "")}, ${JSON.stringify(view)})`,
+  );
+  return JSON.parse(result);
+}
+
 const EMPTY_PARSE = { ok: false, modules: {}, errors: [] };
 const EMPTY_SOLVE = { ok: false, result: "error", errors: [], output: "" };
 
@@ -131,6 +138,8 @@ self.onmessage = async (e) => {
       post("parseResult", { result: await handleParse(msg.code) });
     } else if (msg.type === "solve") {
       post("solveResult", { result: await handleSolve(msg) });
+    } else if (msg.type === "inspect") {
+      post("inspectResult", { result: await handleInspect(msg), view: msg.view });
     }
   } catch (err) {
     const error = { severity: "Error", message: err.message, line: 0, col: 0 };

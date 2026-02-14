@@ -17,6 +17,11 @@
         <option value="Mapping Example">Mapping Example</option>
         <option value="SEND+MORE=MONEY">SEND+MORE=MONEY</option>
         <option value="Hello World">Hello World</option>
+        <option value="Four Queens">Four Queens</option>
+        <option value="Graph Coloring">Graph Coloring</option>
+        <option value="Magic Square">Magic Square</option>
+        <option value="Pythagorean Triple">Pythagorean Triple</option>
+        <option value="Task Scheduling">Task Scheduling</option>
       </select>
     </header>
 
@@ -31,7 +36,13 @@
       </div>
       <div class="panel">
         <div class="panel-header">
-          <span>Output</span>
+          <div class="tab-bar">
+            <button class="tab active" data-tab="output">Output</button>
+            <button class="tab" data-tab="ast">AST</button>
+            <button class="tab" data-tab="types">Types</button>
+            <button class="tab" data-tab="details">Details</button>
+            <button class="tab" data-tab="rules">Rules</button>
+          </div>
           <button id="clear-btn" style="padding:2px 8px;font-size:11px">Clear</button>
         </div>
         <div id="output-wrap">
