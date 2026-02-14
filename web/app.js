@@ -112,157 +112,160 @@ partial model pm of FourQueens
     Queens(a, b, c, d).
 }`,
 
-  "Graph Coloring": `domain GraphColoring
+  "Resource Allocation": `// Resource allocation with derived types and aggregation.
+// Components are mapped to a processor. The solver must find
+// utilizations such that:
+//   - No processor is overloaded (sum of utilizations <= 100)
+//   - No component has zero or negative utilization
+//   - At least 2 components are in the "efficient" range (40-60)
+//
+// Features: derived types, count, sum, negation (no)
+
+domain ResourceAlloc
 {
-    Coloring ::= new (v0: Integer, v1: Integer, v2: Integer, v3: Integer).
+    Component ::= new (id: Integer, utilization: Integer).
+    Processor ::= new (id: Integer).
+    Mapping   ::= new (c: Component, p: Processor).
 
-    // Every vertex gets a color in {1, 2, 3}
-    validRange :- c is Coloring,
-        c.v0 >= 1, c.v0 <= 3,
-        c.v1 >= 1, c.v1 <= 3,
-        c.v2 >= 1, c.v2 <= 3,
-        c.v3 >= 1, c.v3 <= 3.
+    // Derived type: components in the efficient utilization range
+    Efficient ::= (id: Integer, utilization: Integer).
+    Efficient(x, y) :- Component(x, y), y > 40, y < 60.
 
-    // K4: every pair of vertices is adjacent
-    noConflict :- c is Coloring,
-        c.v0 != c.v1,
-        c.v0 != c.v2,
-        c.v0 != c.v3,
-        c.v1 != c.v2,
-        c.v1 != c.v3,
-        c.v2 != c.v3.
+    // Bad: processor total utilization exceeds 100
+    overloaded :- p is Processor,
+        s = sum(0, { c.utilization |
+                     c is Component, Mapping(c, p) }), s > 100.
 
-    conforms validRange, noConflict.
+    // Bad: non-positive utilization
+    invalidUtil :- c is Component, c.utilization <= 0.
+
+    // At least 2 components must be in the efficient range
+    enoughEfficient :- c = count({ e | e is Efficient(x, y) }), c >= 2.
+
+    conforms no overloaded, no invalidUtil.
+    conforms enoughEfficient.
 }
 
-// K4 needs 4 colors, so 3-coloring is UNSAT
-partial model pm3 of GraphColoring
+partial model pm of ResourceAlloc
 {
-    Coloring(a, b, c, d).
+    c0 is Component(0, x).
+    c1 is Component(1, y).
+    c2 is Component(2, z).
+    p0 is Processor(0).
+    Mapping(c0, p0).
+    Mapping(c1, p0).
+    Mapping(c2, p0).
 }`,
 
-  "Magic Square": `domain MagicSquare
+  "Sensor Monitoring": `// Sensor monitoring with derived alerts.
+// Sensors report readings. An Alert is derived for any sensor
+// whose reading exceeds the threshold. The solver must find
+// readings such that at least one alert fires, but all
+// readings stay within physical range.
+//
+// Features: derived types, count aggregation, negation
+
+domain SensorMonitoring
 {
-    Grid ::= new (c00: Integer, c01: Integer, c02: Integer,
-                  c10: Integer, c11: Integer, c12: Integer,
-                  c20: Integer, c21: Integer, c22: Integer).
+    Sensor    ::= new (id: Integer, reading: Integer).
+    Threshold ::= new (maxVal: Integer).
 
-    // Each cell contains a value in [1, 9]
-    validRange :- g is Grid,
-        g.c00 >= 1, g.c00 <= 9,
-        g.c01 >= 1, g.c01 <= 9,
-        g.c02 >= 1, g.c02 <= 9,
-        g.c10 >= 1, g.c10 <= 9,
-        g.c11 >= 1, g.c11 <= 9,
-        g.c12 >= 1, g.c12 <= 9,
-        g.c20 >= 1, g.c20 <= 9,
-        g.c21 >= 1, g.c21 <= 9,
-        g.c22 >= 1, g.c22 <= 9.
+    // Derived: sensors that exceed the threshold
+    Alert ::= (sensorId: Integer, reading: Integer).
+    Alert(id, r) :- s is Sensor, id = s.id, r = s.reading,
+                    t is Threshold, r > t.maxVal.
 
-    // All nine values are distinct
-    allDistinct :- g is Grid,
-        g.c00 != g.c01, g.c00 != g.c02, g.c00 != g.c10,
-        g.c00 != g.c11, g.c00 != g.c12, g.c00 != g.c20,
-        g.c00 != g.c21, g.c00 != g.c22,
-        g.c01 != g.c02, g.c01 != g.c10, g.c01 != g.c11,
-        g.c01 != g.c12, g.c01 != g.c20, g.c01 != g.c21,
-        g.c01 != g.c22,
-        g.c02 != g.c10, g.c02 != g.c11, g.c02 != g.c12,
-        g.c02 != g.c20, g.c02 != g.c21, g.c02 != g.c22,
-        g.c10 != g.c11, g.c10 != g.c12, g.c10 != g.c20,
-        g.c10 != g.c21, g.c10 != g.c22,
-        g.c11 != g.c12, g.c11 != g.c20, g.c11 != g.c21,
-        g.c11 != g.c22,
-        g.c12 != g.c20, g.c12 != g.c21, g.c12 != g.c22,
-        g.c20 != g.c21, g.c20 != g.c22,
-        g.c21 != g.c22.
+    // At least one alert must fire
+    hasAlerts :- c = count({ a | a is Alert(x, y) }), c > 0.
 
-    // Every row sums to 15
-    rowSums :- g is Grid,
-        g.c00 + g.c01 + g.c02 = 15,
-        g.c10 + g.c11 + g.c12 = 15,
-        g.c20 + g.c21 + g.c22 = 15.
+    // Bad: reading outside physical range [0, 1000]
+    outOfRange :- s is Sensor, s.reading < 0.
+    outOfRange :- s is Sensor, s.reading > 1000.
 
-    // Every column sums to 15
-    colSums :- g is Grid,
-        g.c00 + g.c10 + g.c20 = 15,
-        g.c01 + g.c11 + g.c21 = 15,
-        g.c02 + g.c12 + g.c22 = 15.
-
-    // Both diagonals sum to 15
-    diagSums :- g is Grid,
-        g.c00 + g.c11 + g.c22 = 15,
-        g.c02 + g.c11 + g.c20 = 15.
-
-    conforms validRange, allDistinct, rowSums, colSums, diagSums.
+    conforms hasAlerts.
+    conforms no outOfRange.
 }
 
-partial model pm of MagicSquare
+partial model pm of SensorMonitoring
 {
-    Grid(a, b, c, d, e, f, g, h, i).
+    Sensor(0, x).
+    Sensor(1, y).
+    Sensor(2, z).
+    Threshold(50).
 }`,
 
-  "Pythagorean Triple": `domain PythagoreanTriple
+  "Peak Detection": `// Peak detection using max() across sensor pairs.
+// The solver derives the peak value across all pairs of
+// sensors, then constrains it to exceed a threshold.
+//
+// Features: derived types, max operator, negation
+
+domain PeakDetection
 {
-    Triple ::= new (a: Integer, b: Integer, c: Integer).
+    Reading ::= new (sensor: Integer, value: Integer).
 
-    // All sides are positive
-    positive :- t is Triple, t.a >= 1, t.b >= 1, t.c >= 1.
+    // Derived: peak value across pairs of sensors
+    peakVal ::= (v: Integer).
+    peakVal(v) :- a is Reading, b is Reading,
+                  a.sensor != b.sensor, v = max(a.value, b.value).
 
-    // a^2 + b^2 = c^2
-    pythagorean :- t is Triple, t.a * t.a + t.b * t.b = t.c * t.c.
+    // Bad: reading out of range [0, 200]
+    badReading :- r is Reading, r.value < 0.
+    badReading :- r is Reading, r.value > 200.
 
-    // Canonical order: a <= b < c
-    ordered :- t is Triple, t.a <= t.b, t.b < t.c.
+    // The peak must exceed 150
+    peakHigh :- p is peakVal, p.v > 150.
 
-    // Keep solutions small
-    bounded :- t is Triple, t.c <= 50.
-
-    conforms positive, pythagorean, ordered, bounded.
+    conforms no badReading.
+    conforms peakHigh.
 }
 
-partial model pm of PythagoreanTriple
+partial model pm of PeakDetection
 {
-    Triple(a, b, c).
+    Reading(0, x).
+    Reading(1, y).
+    Reading(2, z).
 }`,
 
-  "Task Scheduling": `domain TaskScheduling
+  "Student Grading": `// Student grading with derived categories and count constraints.
+// Students have scores. Rules derive which students pass (>=60)
+// and which are high achievers (>=90). Conforms constraints
+// require at least 2 passing and at least 1 high achiever.
+//
+// Features: multiple derived types, count aggregation, negation
+
+domain Grading
 {
-    Schedule ::= new (s0: Integer, s1: Integer, s2: Integer,
-                      s3: Integer, s4: Integer).
+    Student ::= new (id: Integer, score: Integer).
 
-    // All start times are non-negative
-    validStarts :- s is Schedule,
-        s.s0 >= 0, s.s1 >= 0, s.s2 >= 0, s.s3 >= 0, s.s4 >= 0.
+    // Derived: students who pass
+    PassStudent ::= (id: Integer, score: Integer).
+    PassStudent(i, s) :- Student(i, s), s >= 60.
 
-    // Precedence: T0->T1, T0->T2, T1->T3, T2->T4
-    precedences :- s is Schedule,
-        s.s0 + 3 <= s.s1,
-        s.s0 + 3 <= s.s2,
-        s.s1 + 2 <= s.s3,
-        s.s2 + 4 <= s.s4.
+    // Derived: high achievers
+    HighAchiever ::= (id: Integer, score: Integer).
+    HighAchiever(i, s) :- Student(i, s), s >= 90.
 
-    // Non-overlap: sequential ordering T0,T1,T2,T3,T4
-    noOverlap :- s is Schedule,
-        s.s0 + 3 <= s.s1,
-        s.s1 + 2 <= s.s2,
-        s.s2 + 4 <= s.s3,
-        s.s3 + 2 <= s.s4.
+    // Bad: score outside valid range [0, 100]
+    badScore :- s is Student, s.score < 0.
+    badScore :- s is Student, s.score > 100.
 
-    // Makespan: all tasks finish by time 20
-    bounded :- s is Schedule,
-        s.s0 + 3 <= 20,
-        s.s1 + 2 <= 20,
-        s.s2 + 4 <= 20,
-        s.s3 + 2 <= 20,
-        s.s4 + 3 <= 20.
+    // At least 2 students must pass
+    enoughPass :- c = count({ p | p is PassStudent(x, y) }), c >= 2.
 
-    conforms validStarts, precedences, noOverlap, bounded.
+    // At least 1 high achiever
+    hasTopStudent :- c = count({ h | h is HighAchiever(x, y) }), c >= 1.
+
+    conforms no badScore.
+    conforms enoughPass.
+    conforms hasTopStudent.
 }
 
-partial model pm of TaskScheduling
+partial model pm of Grading
 {
-    Schedule(a, b, c, d, e).
+    Student(0, a).
+    Student(1, b).
+    Student(2, c).
 }`,
 };
 
