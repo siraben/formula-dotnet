@@ -817,8 +817,12 @@ def _get_recursion_bound(model: Model) -> int:
 
 # ── Main entry point ─────────────────────────────────────────────
 
-def direct_solve(domain_node, model_node, max_sols, sink) -> bool:
-    """Solve a partial model against a domain's conformance specification."""
+def direct_solve(domain_node, model_node, max_sols, sink) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Solve a partial model against a domain's conformance specification.
+
+    Returns (success, solution_data) where solution_data is a dict mapping
+    variable names to their solved values, or None if unsat.
+    """
     sink.write_message_line("Starting direct Z3 solver...", SeverityKind.Info)
 
     ctx = _build_ctx(domain_node, model_node)
@@ -856,21 +860,49 @@ def direct_solve(domain_node, model_node, max_sols, sink) -> bool:
         elif isinstance(c, bool):
             if not c:
                 sink.write_message_line("  Trivially UNSAT", SeverityKind.Info)
-                return False
+                return False, None
 
     sink.write_message_line("  Checking satisfiability...", SeverityKind.Info)
-    result = solver.check()
 
-    if result == z3.sat:
-        model = solver.model()
-        sink.write_message_line("  SAT - Solution found!", SeverityKind.Info)
-        for vn in sorted(ctx.z3_vars.keys()):
-            val = model.evaluate(ctx.z3_vars[vn])
-            sink.write_message_line("    %s = %s" % (vn, val), SeverityKind.Info)
-        return True
-    elif result == z3.unsat:
-        sink.write_message_line("  UNSAT - No solution", SeverityKind.Info)
-        return False
-    else:
-        sink.write_message_line("  UNKNOWN - Solver inconclusive", SeverityKind.Warning)
-        return False
+    solutions: List[Dict[str, str]] = []
+    sol_count = 0
+
+    while sol_count < max_sols:
+        result = solver.check()
+
+        if result == z3.sat:
+            model = solver.model()
+            sol_count += 1
+            sink.write_message_line(
+                "  SAT - Solution %d found!" % sol_count, SeverityKind.Info
+            )
+            solution: Dict[str, str] = {}
+            block_clause = []
+            for vn in sorted(ctx.z3_vars.keys()):
+                zvar = ctx.z3_vars[vn]
+                val = model.evaluate(zvar)
+                sink.write_message_line("    %s = %s" % (vn, val), SeverityKind.Info)
+                solution[vn] = str(val)
+                block_clause.append(zvar != val)
+            solutions.append(solution)
+
+            if sol_count < max_sols:
+                # Block this solution to find the next one
+                solver.add(z3.Or(*block_clause))
+        elif result == z3.unsat:
+            if sol_count == 0:
+                sink.write_message_line("  UNSAT - No solution", SeverityKind.Info)
+            else:
+                sink.write_message_line(
+                    "  No more solutions (%d total)" % sol_count, SeverityKind.Info
+                )
+            break
+        else:
+            sink.write_message_line(
+                "  UNKNOWN - Solver inconclusive", SeverityKind.Warning
+            )
+            break
+
+    if solutions:
+        return True, solutions[0]
+    return False, None

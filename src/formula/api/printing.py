@@ -72,6 +72,13 @@ def print_node(node: Node, writer: TextIO, indent: int = 0) -> None:
     _PRINTERS.get(kind, _print_unknown)(node, writer, indent)
 
 
+def node_to_string(node: Node, indent: int = 0) -> str:
+    """Render *node* as FORMULA source and return as a string."""
+    buf = io.StringIO()
+    print_node(node, buf, indent)
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -239,8 +246,13 @@ def _print_model(node: Model, writer: TextIO, indent: int) -> None:
 
 
 def _print_machine(node: Machine, writer: TextIO, indent: int) -> None:
-    writer.write(f"{_ind(indent)}machine {node.name} of ")
-    _print_mod_ref(node.state_domain, writer, 0)
+    writer.write(f"{_ind(indent)}machine {node.name}")
+    if node.state_domains:
+        writer.write(" of ")
+        for i, sd in enumerate(node.state_domains):
+            _print_mod_ref(sd, writer, 0)
+            if i < len(node.state_domains) - 1:
+                writer.write(", ")
     writer.write(f" (")
     for i, inp in enumerate(node.inputs):
         _print_param(inp, writer, 0)
@@ -249,12 +261,15 @@ def _print_machine(node: Machine, writer: TextIO, indent: int) -> None:
     writer.write(f")\n{_ind(indent)}{{\n")
     if node.config and node.config.settings:
         _print_config(node.config, writer, indent + 1)
-    for stp in node.boot_steps:
+    for stp in node.boot_sequence:
         writer.write(f"{_ind(indent + 1)}boot\n")
         print_node(stp, writer, indent + 2)
-    for stp in node.next_steps:
-        writer.write(f"{_ind(indent + 1)}next\n")
-        print_node(stp, writer, indent + 2)
+    for u in node.initials:
+        print_node(u, writer, indent + 1)
+    for u in node.nexts:
+        print_node(u, writer, indent + 1)
+    for prop in node.properties:
+        print_node(prop, writer, indent + 1)
     writer.write(f"{_ind(indent)}}}\n\n")
 
 
@@ -265,7 +280,7 @@ def _print_config(node: Config, writer: TextIO, indent: int) -> None:
 
 def _print_setting(node: Setting, writer: TextIO, indent: int) -> None:
     writer.write(f"{_ind(indent)}[")
-    _print_id(node.id, writer, 0)
+    _print_id(node.key, writer, 0)
     writer.write(" = ")
     _print_cnst(node.value, writer, 0)
     writer.write("]\n")
@@ -310,13 +325,13 @@ def _print_con_decl(node: ConDecl, writer: TextIO, indent: int) -> None:
 def _print_map_decl(node: MapDecl, writer: TextIO, indent: int) -> None:
     writer.write(f"{_ind(indent)}{node.name} ::= ")
     writer.write(f"{_map_kind_keyword(node.map_kind)} (")
-    dom_fields = node.dom_fields
+    dom_fields = node.dom
     for i, fld in enumerate(dom_fields):
         _print_field(fld, writer, 0)
         if i < len(dom_fields) - 1:
             writer.write(", ")
     writer.write(" -> ")
-    cod_fields = node.cod_fields
+    cod_fields = node.cod
     for i, fld in enumerate(cod_fields):
         _print_field(fld, writer, 0)
         if i < len(cod_fields) - 1:
@@ -335,7 +350,7 @@ def _print_field(node: Field, writer: TextIO, indent: int) -> None:
         writer.write(f"{node.name}: ")
     if node.is_any:
         writer.write("any ")
-    _print_type_term(node.type_term, writer, 0)
+    _print_type_term(node.type, writer, 0)
 
 
 def _print_type_term(node: Node, writer: TextIO, indent: int) -> None:
@@ -419,13 +434,14 @@ def _print_find(node: Find, writer: TextIO, indent: int) -> None:
 
 
 def _print_rel_constr(node: RelConstr, writer: TextIO, indent: int) -> None:
-    if node.rel_kind == RelKind.No:
+    if node.op == RelKind.No:
         writer.write("no ")
         _print_func_or_atom(node.arg1, writer, 0)
         return
     _print_func_or_atom(node.arg1, writer, 0)
-    writer.write(f" {_rel_symbol(node.rel_kind)} ")
-    _print_func_or_atom(node.arg2, writer, 0)
+    writer.write(f" {_rel_symbol(node.op)} ")
+    if node.arg2 is not None:
+        _print_func_or_atom(node.arg2, writer, 0)
 
 
 def _print_func_term(node: FuncTerm, writer: TextIO, indent: int) -> None:
@@ -472,7 +488,7 @@ def _print_quote(node: Quote, writer: TextIO, indent: int) -> None:
 
 
 def _print_compr(node: Compr, writer: TextIO, indent: int) -> None:
-    writer.write("count({")
+    writer.write("{")
     heads = node.heads
     for i, head in enumerate(heads):
         _print_func_or_atom(head, writer, 0)
@@ -485,7 +501,7 @@ def _print_compr(node: Compr, writer: TextIO, indent: int) -> None:
             _print_body(body, writer, 0)
             if i < len(bodies) - 1:
                 writer.write("; ")
-    writer.write("})")
+    writer.write("}")
 
 
 def _print_model_fact(node: ModelFact, writer: TextIO, indent: int) -> None:
@@ -499,11 +515,16 @@ def _print_model_fact(node: ModelFact, writer: TextIO, indent: int) -> None:
 
 def _print_contract_item(node: ContractItem, writer: TextIO, indent: int) -> None:
     writer.write(f"{_ind(indent)}{_contract_keyword(node.contract_kind)} ")
-    spec = node.specification
-    if spec.node_kind == NodeKind.Body:
-        _print_body(spec, writer, 0)
-    elif spec.node_kind == NodeKind.CardPair:
-        _print_card_pair(spec, writer, 0)
+    specs = node.specification
+    for i, spec in enumerate(specs):
+        if spec.node_kind == NodeKind.Body:
+            _print_body(spec, writer, 0)
+        elif spec.node_kind == NodeKind.CardPair:
+            _print_card_pair(spec, writer, 0)
+        else:
+            _print_func_or_atom(spec, writer, 0)
+        if i < len(specs) - 1:
+            writer.write(", ")
     writer.write(".\n")
 
 
@@ -516,7 +537,10 @@ def _print_step(node: Step, writer: TextIO, indent: int) -> None:
     writer.write(_ind(indent))
     lhs = node.lhs
     if lhs:
-        _print_id(lhs, writer, 0)
+        for i, lhs_id in enumerate(lhs):
+            _print_id(lhs_id, writer, 0)
+            if i < len(lhs) - 1:
+                writer.write(", ")
         writer.write(" = ")
     _print_mod_apply(node.rhs, writer, 0)
     writer.write(".\n")
@@ -549,22 +573,20 @@ def _print_update(node: Update, writer: TextIO, indent: int) -> None:
 
 
 def _print_property(node: Property, writer: TextIO, indent: int) -> None:
-    writer.write(f"{_ind(indent)}")
-    _print_id(node.name_id, writer, 0)
-    writer.write(" = ")
-    _print_func_or_atom(node.value, writer, 0)
+    writer.write(f"{_ind(indent)}{node.name} = ")
+    _print_func_or_atom(node.definition, writer, 0)
     writer.write(".\n")
 
 
 def _print_param(node: Param, writer: TextIO, indent: int) -> None:
     if node.name:
         writer.write(f"{node.name} :: ")
-    type_term = node.type_term
-    if type_term is not None:
-        if type_term.node_kind == NodeKind.ModRef:
-            _print_mod_ref(type_term, writer, 0)
+    type_node = node.type
+    if type_node is not None:
+        if type_node.node_kind == NodeKind.ModRef:
+            _print_mod_ref(type_node, writer, 0)
         else:
-            _print_type_term(type_term, writer, 0)
+            _print_type_term(type_node, writer, 0)
 
 
 def _print_unknown(node: Node, writer: TextIO, indent: int) -> None:
